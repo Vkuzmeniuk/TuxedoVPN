@@ -1,0 +1,109 @@
+---
+- name: Ensure OpenSSL is installed (self-signed)
+  ansible.builtin.package:
+    name: openssl
+    state: present
+
+- name: Ensure self-signed cert directory exists
+  ansible.builtin.file:
+    path: "{{ mgmt_reverse_proxy_selfsigned_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Check self-signed key presence
+  ansible.builtin.stat:
+    path: "{{ mgmt_reverse_proxy_selfsigned_dir }}/server.key"
+  register: _mgmt_proxy_key_stat
+  changed_when: false
+
+- name: Check self-signed cert presence
+  ansible.builtin.stat:
+    path: "{{ mgmt_reverse_proxy_selfsigned_dir }}/server.crt"
+  register: _mgmt_proxy_crt_stat
+  changed_when: false
+
+- name: Fail when cert exists without key
+  ansible.builtin.assert:
+    that:
+      - not (_mgmt_proxy_crt_stat.stat.exists | default(false)) or (_mgmt_proxy_key_stat.stat.exists | default(false))
+    fail_msg: >-
+      Self-signed certificate exists at {{ mgmt_reverse_proxy_selfsigned_dir }}/server.crt but the private key is missing at
+      {{ mgmt_reverse_proxy_selfsigned_dir }}/server.key. Restore the key, or remove the certificate to re-issue it.
+
+- name: Build SAN list for mgmt reverse proxy
+  ansible.builtin.set_fact:
+    _mgmt_proxy_sans: >-
+      {{
+        (
+          (mgmt_reverse_proxy_services | default([]) | map(attribute='server_name') | list)
+          + [ mgmt_reverse_proxy_base_domain ]
+        ) | unique
+      }}
+  changed_when: false
+
+- name: Render OpenSSL config for self-signed SAN certificate
+  ansible.builtin.copy:
+    dest: "{{ mgmt_reverse_proxy_selfsigned_dir }}/server.cnf"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [req]
+      distinguished_name = dn
+      x509_extensions = v3_req
+      prompt = no
+
+      [dn]
+      CN = {{ mgmt_reverse_proxy_base_domain }}
+
+      [v3_req]
+      subjectAltName = @alt_names
+
+      [alt_names]
+      {% for dns in (_mgmt_proxy_sans | default([])) %}
+      DNS.{{ loop.index }} = {{ dns }}
+      {% endfor %}
+  when: not (_mgmt_proxy_crt_stat.stat.exists | default(false))
+
+- name: Generate self-signed private key (first run)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    openssl genrsa -out "{{ mgmt_reverse_proxy_selfsigned_dir }}/server.key" 4096
+  args:
+    executable: /bin/bash
+  when: not (_mgmt_proxy_key_stat.stat.exists | default(false))
+  no_log: true
+
+- name: Generate self-signed certificate (first run)
+  ansible.builtin.command: >
+    openssl req -x509 -new -nodes
+    -key "{{ mgmt_reverse_proxy_selfsigned_dir }}/server.key"
+    -sha256 -days 825
+    -out "{{ mgmt_reverse_proxy_selfsigned_dir }}/server.crt"
+    -config "{{ mgmt_reverse_proxy_selfsigned_dir }}/server.cnf"
+    -extensions v3_req
+  when: not (_mgmt_proxy_crt_stat.stat.exists | default(false))
+
+- name: Ensure self-signed key permissions
+  ansible.builtin.file:
+    path: "{{ mgmt_reverse_proxy_selfsigned_dir }}/server.key"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Ensure self-signed certificate permissions
+  ansible.builtin.file:
+    path: "{{ mgmt_reverse_proxy_selfsigned_dir }}/server.crt"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Set effective TLS paths (self-signed)
+  ansible.builtin.set_fact:
+    mgmt_reverse_proxy_tls_fullchain_effective: "{{ mgmt_reverse_proxy_selfsigned_dir }}/server.crt"
+    mgmt_reverse_proxy_tls_key_effective: "{{ mgmt_reverse_proxy_selfsigned_dir }}/server.key"
+  changed_when: false
+

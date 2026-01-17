@@ -1,0 +1,40 @@
+---
+- name: Restart PostgreSQL
+  ansible.builtin.service:
+    name: "{{ freeradius_pg_service_name }}"
+    state: restarted
+
+- name: Restart FreeRADIUS
+  block:
+    - name: Validate FreeRADIUS config (redacted)
+      ansible.builtin.shell: |
+        set -o pipefail
+        freeradius -XC -d "{{ freeradius_conf_dir }}" 2>&1 | sed -E \
+          -e 's/(password\\s*=\\s*).*/\\1***REDACTED***/Ig' \
+          -e 's/(secret\\s*=\\s*).*/\\1***REDACTED***/Ig'
+      register: freeradius_configcheck
+      changed_when: false
+
+    - name: Restart FreeRADIUS
+      ansible.builtin.service:
+        name: "{{ freeradius_radius_service_name }}"
+        state: restarted
+  rescue:
+    - name: Fail with FreeRADIUS config check output
+      ansible.builtin.fail:
+        msg: >-
+          FreeRADIUS config check failed (freeradius -XC).
+          Output (redacted):
+          {{ (freeradius_configcheck.stdout | default('')) + '\n' + (freeradius_configcheck.stderr | default('')) }}
+
+- name: Restart FreeRADIUS accounting exporter
+  ansible.builtin.systemd:
+    name: freeradius-accounting-exporter.service
+    state: restarted
+    daemon_reload: true
+
+- name: Restart TuxedoVPN FreeRADIUS status exporter
+  ansible.builtin.systemd:
+    name: tuxedovpn-freeradius-status-exporter.service
+    state: restarted
+    daemon_reload: true

@@ -1,0 +1,98 @@
+---
+# This playbook prepares data for the management WireGuard tunnel
+# and calls common WireGuard setup tasks. It gathers information about VPN hosts,
+# validates prerequisites, and populates host variables required by `wireguard.yml`.
+
+- name: Determine VPN hosts for management WireGuard
+  ansible.builtin.set_fact:
+    mgmt_wireguard_vpn_hosts: "{{ groups[mgmt_wireguard_vpn_group] | default([]) }}"
+
+- name: Determine VPN hosts included in this play
+  ansible.builtin.set_fact:
+    mgmt_wireguard_vpn_hosts_in_play: "{{ (mgmt_wireguard_vpn_hosts | default([])) | intersect(ansible_play_hosts_all | default([])) }}"
+  changed_when: false
+
+- name: Ensure there are VPN hosts defined for management WireGuard
+  ansible.builtin.assert:
+    that:
+      - mgmt_wireguard_vpn_hosts | length > 0
+    fail_msg: "No hosts found in group '{{ mgmt_wireguard_vpn_group }}' for mgmt-wireguard. Please populate this group with VPN servers."
+
+- name: Ensure mgmt-wireguard runs against mgmt+vpn hosts
+  ansible.builtin.assert:
+    that:
+      - (mgmt_wireguard_vpn_hosts_in_play | default([])) | length > 0
+    fail_msg: >-
+      mgmt-wireguard must run against both mgmt and vpn hosts so WireGuard keys can be generated and exchanged.
+      Your current limit appears to exclude all vpn hosts from this play. Re-run without `-l` or include `-l mgmt,vpn`.
+  when: mgmt_wireguard_mgmt_group in group_names
+
+- name: Ensure each VPN host defines a vpn_network_address
+  ansible.builtin.assert:
+    that:
+      - hostvars[item].vpn_network_address is defined
+    quiet: true
+    fail_msg: "Host '{{ item }}' must define vpn_network_address for mgmt-wireguard."
+  loop: "{{ mgmt_wireguard_vpn_hosts_in_play }}"
+
+- name: Validate VPN host subnet inputs (vpn_network_address/prefix)
+  ansible.builtin.assert:
+    that:
+      - (hostvars[item].vpn_network_address | default('') | string) is match('^\\d{1,3}(\\.\\d{1,3}){3}$')
+      - (hostvars[item].vpn_network_address | string) is match('.*\\.0$')
+      - (hostvars[item].vpn_network_prefix_length | default(hostvars[item].vpn_network_prefix | default(mgmt_wireguard_default_prefix_length)) | int) >= 1
+      - (hostvars[item].vpn_network_prefix_length | default(hostvars[item].vpn_network_prefix | default(mgmt_wireguard_default_prefix_length)) | int) <= 32
+    quiet: true
+    fail_msg: >-
+      Host '{{ item }}' must define a valid VPN client subnet.
+      Expected: vpn_network_address like '10.66.1.0' and vpn_network_prefix_length 1..32 (default {{ mgmt_wireguard_default_prefix_length }}).
+  loop: "{{ mgmt_wireguard_vpn_hosts_in_play }}"
+
+- name: Reset list of VPN network data
+  ansible.builtin.set_fact:
+    mgmt_wireguard_vpn_data: []
+
+- name: Build VPN network data for management routing
+  ansible.builtin.set_fact:
+    mgmt_wireguard_vpn_data: "{{ mgmt_wireguard_vpn_data + [ __mgmt_wireguard_tmp_rec ] }}"
+  vars:
+    __mgmt_wireguard_prefix_length: >-
+      {{
+        hostvars[_mgmt_host].vpn_network_prefix_length
+        | default(hostvars[_mgmt_host].vpn_network_prefix | default(mgmt_wireguard_default_prefix_length))
+        | int
+      }}
+    __mgmt_wireguard_tmp_rec:
+      name: "{{ _mgmt_host }}"
+      network: "{{ hostvars[_mgmt_host].vpn_network_address }}"
+      prefix_length: "{{ __mgmt_wireguard_prefix_length }}"
+      cidr: "{{ hostvars[_mgmt_host].vpn_network_address }}/{{ __mgmt_wireguard_prefix_length }}"
+      ansible_host: "{{ hostvars[_mgmt_host].ansible_host | default(_mgmt_host) }}"
+  loop: "{{ mgmt_wireguard_vpn_hosts_in_play }}"
+  loop_control:
+    loop_var: _mgmt_host
+
+- name: Ensure VPN client subnets are unique
+  ansible.builtin.assert:
+    that:
+      - (mgmt_wireguard_vpn_data | map(attribute='cidr') | list | unique | length) == (mgmt_wireguard_vpn_data | length)
+    quiet: true
+    fail_msg: >-
+      Duplicate VPN client subnets detected for mgmt-wireguard:
+      {{ mgmt_wireguard_vpn_data | map(attribute='cidr') | list }}
+
+- name: Determine management host for WireGuard
+  ansible.builtin.set_fact:
+    mgmt_wireguard_mgmt_host: "{{ groups[mgmt_wireguard_mgmt_group] | first | default('') }}"
+
+- name: Determine public IP or hostname of management host
+  ansible.builtin.set_fact:
+    mgmt_wireguard_mgmt_public_ip: "{{ hostvars[mgmt_wireguard_mgmt_host].ansible_host | default(mgmt_wireguard_mgmt_host) }}"
+  when: mgmt_wireguard_mgmt_host | length > 0
+
+- name: Include WireGuard setup tasks
+  ansible.builtin.include_tasks: wireguard.yml
+
+- name: Include UFW service allow-list rules for WireGuard
+  ansible.builtin.include_tasks: firewall.yml
+  when: mgmt_wireguard_mgmt_group in group_names

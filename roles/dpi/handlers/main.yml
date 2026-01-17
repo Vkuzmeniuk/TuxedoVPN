@@ -1,0 +1,12 @@
+---
+- name: Restart tuxedovpn Suricata (NFQUEUE)
+  ansible.builtin.systemd:
+    name: tuxedovpn-suricata.service
+    state: restarted
+    daemon_reload: true
+
+- name: Restart tuxedovpn DPI agent
+  ansible.builtin.systemd:
+    name: tuxedovpn-dpi-agent.service
+    state: restarted
+    daemon_reload: true

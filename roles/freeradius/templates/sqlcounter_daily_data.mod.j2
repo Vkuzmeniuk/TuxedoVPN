@@ -1,0 +1,12 @@
+{% set input_expr = freeradius_radacct_input_octets_expr | default('acctinputoctets::bigint') %}
+{% set output_expr = freeradius_radacct_output_octets_expr | default('acctoutputoctets::bigint') %}
+sqlcounter sqlcounter_daily_data {
+    sql_module_instance = sql
+    dialect = "postgresql"
+    counter_name = Daily-Data-Usage
+    key = User-Name
+    reset = daily
+    check_name = {{ freeradius_daily_quota_attribute }}
+    reply_name = Reply-Message
+    query = "SELECT COALESCE(SUM(({{ input_expr }}) + ({{ output_expr }})),0)::bigint FROM radacct WHERE username = '{% raw %}%{%{SQL-User-Name}:-%{User-Name}}{% endraw %}' AND acctstarttime >= DATE_TRUNC('day', NOW())"
+}

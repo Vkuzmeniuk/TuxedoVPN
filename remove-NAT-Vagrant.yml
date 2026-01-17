@@ -1,0 +1,34 @@
+---
+- name: Remove from vagrant functioning NAT
+  hosts: vpn
+  tasks:
+  - name: Detect if it was provisioned by Vagrant
+    ansible.builtin.stat:
+      path: /etc/sudoers.d/vagrant
+    become: true
+    register: vagrant_sudoers
+
+  - name: Disable vagrant NAT interface enp0s3
+    block:
+      - name: Check if standard vagrant NAT is down
+        ansible.builtin.command: ip addr show enp0s3
+        register: nat_check
+        ignore_errors: true
+        changed_when: false
+
+      - name: Comply with network settings
+        lineinfile:
+          path: /etc/netplan/50-cloud-init.yaml
+          insertafter: 'enp0s3:'
+          line: '            activation-mode: off'
+          state: present
+        when: 
+          - nat_check.stdout is search ("state UP")
+
+      - name: Apply netplan changes
+        command: netplan apply
+        become: true
+        when: nat_check.stdout is search ("state UP")
+    when: vagrant_sudoers.stat.exists
+    become: true
+    tags: ['vagrant']

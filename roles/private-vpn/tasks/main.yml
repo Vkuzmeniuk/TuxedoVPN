@@ -1,0 +1,4 @@
+---
+- name: Apply private VPN configuration
+  ansible.builtin.import_role:
+    name: common-vpn

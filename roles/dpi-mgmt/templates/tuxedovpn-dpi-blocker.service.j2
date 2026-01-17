@@ -1,0 +1,14 @@
+[Unit]
+Description=TuxedoVPN DPI blocker (webhook -> FreeRADIUS blocklist)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/tuxedovpn/dpi-blocker.env
+ExecStart=/usr/local/bin/tuxedovpn-dpi-blocker.py
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,36 @@
+---
+radius_pihole_sync_enable: true
+
+# PostgreSQL connection (FreeRADIUS).
+radius_pihole_sync_pg_host: "127.0.0.1"
+radius_pihole_sync_pg_port: 5432
+radius_pihole_sync_pg_db: "{{ freeradius_db_name | default('radius') }}"
+radius_pihole_sync_pg_user: "tuxedovpn_pihole_sync"
+radius_pihole_sync_pg_sslmode: "require"
+radius_pihole_sync_pg_connect_timeout: 2
+radius_pihole_sync_pg_statement_timeout_seconds: 5
+radius_pihole_sync_pg_listen_channel: "tuxedovpn_pihole_sync"
+
+# Local files with generated creds (stored on mgmt).
+radius_pihole_sync_db_password_path: "/etc/tuxedovpn/radius-pihole-sync.dbpass"
+radius_pihole_sync_pgpass_path: "/etc/tuxedovpn/radius-pihole-sync.pgpass"
+
+# Pi-hole.
+radius_pihole_sync_gravity_db_path: "/etc/pihole/gravity.db"
+radius_pihole_sync_group_prefix: "radius:"
+radius_pihole_sync_default_group: "default"
+radius_pihole_sync_managed_client_comment_prefix: "tuxedovpn-radius:"
+radius_pihole_sync_pihole_reload_command: "/usr/local/bin/pihole reloaddns"
+radius_pihole_sync_pihole_reload_min_interval_seconds: 10
+
+# Sync loop behavior.
+radius_pihole_sync_sync_debounce_seconds: 0.5
+# Event-driven is the primary mode. Set to 0 to disable periodic full sync.
+radius_pihole_sync_full_sync_interval_seconds: 0
+
+# Metrics exporter.
+radius_pihole_sync_metrics_listen_ip: "127.0.0.1"
+radius_pihole_sync_metrics_listen_port: 9817
+radius_pihole_sync_metrics_path: "/metrics"
+
+radius_pihole_sync_log_level: "INFO"

@@ -1,0 +1,16 @@
+server prometheus {
+    listen {
+        type = "http"
+        ipaddr = {{ freeradius_prometheus_listen_ip }}
+        port = {{ freeradius_prometheus_listen_port }}
+    }
+
+    authorize {
+        prometheus
+        ok
+    }
+
+    authenticate {
+        Auth-Type := Accept
+    }
+}

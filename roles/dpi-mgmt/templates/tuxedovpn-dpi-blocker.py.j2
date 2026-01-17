@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+import json
+import os
+import time
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
+
+import psycopg2
+
+
+LISTEN_IP = os.environ.get("DPI_LISTEN_IP", "127.0.0.1")
+LISTEN_PORT = int(os.environ.get("DPI_LISTEN_PORT", "9816"))
+WEBHOOK_TOKEN = os.environ.get("DPI_WEBHOOK_TOKEN", "").strip()
+BLOCK_SECONDS = int(os.environ.get("DPI_BLOCK_SECONDS", "900"))
+
+DB_HOST = os.environ.get("DB_HOST", "127.0.0.1")
+DB_PORT = int(os.environ.get("DB_PORT", "5432"))
+DB_NAME = os.environ.get("DB_NAME", "radius")
+DB_USER = os.environ.get("DB_USER", "radius")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
+
+
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
+def _iso_utc(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _log(msg: str):
+    ts = _utc_now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}Z] {msg}", flush=True)
+
+
+def _db_connect():
+    return psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        connect_timeout=3,
+        sslmode="disable",
+    )
+
+
+def _resolve_username_by_vpn_ip(conn, vpn_ip: str):
+    if not vpn_ip:
+        return ""
+    try:
+        ip_address(vpn_ip)
+    except ValueError:
+        return ""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT username
+                FROM radacct_active_sessions
+                WHERE framedipaddress = %s
+                ORDER BY acctstarttime DESC
+                LIMIT 1;
+                """,
+                (vpn_ip,),
+            )
+            row = cur.fetchone()
+            return (row[0] or "").strip() if row else ""
+    except Exception:
+        # Fallback for environments without an SQL VIEW.
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT username
+                    FROM radacct
+                    WHERE acctstoptime IS NULL
+                      AND framedipaddress = %s
+                    ORDER BY acctstarttime DESC
+                    LIMIT 1;
+                    """,
+                    (vpn_ip,),
+                )
+                row = cur.fetchone()
+                return (row[0] or "").strip() if row else ""
+        except Exception:
+            return ""
+
+
+def _upsert_block(conn, username: str, reason: str):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO vpn_user_blocklist (username, reason, created_at, expires_at)
+            VALUES (%s, %s, NOW(), NOW() + (%s * INTERVAL '1 second'))
+            ON CONFLICT (username) DO UPDATE
+              SET reason = EXCLUDED.reason,
+                  created_at = NOW(),
+                  expires_at = NOW() + (%s * INTERVAL '1 second')
+            RETURNING expires_at;
+            """,
+            (username, reason, BLOCK_SECONDS, BLOCK_SECONDS),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    return row[0] if row else None
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path.rstrip("/") != "/event":
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found\n")
+            return
+
+        if WEBHOOK_TOKEN:
+            token = (self.headers.get("X-TuxedoVPN-Token") or "").strip()
+            if token != WEBHOOK_TOKEN:
+                _log(f"Webhook forbidden from={self.client_address[0]!r}")
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"Forbidden\n")
+                return
+
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+            _log(f"Webhook bad request from={self.client_address[0]!r} (invalid JSON)")
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Bad Request\n")
+            return
+
+        username = (payload.get("username") or "").strip()
+        signature = (payload.get("signature") or "").strip()
+        host = (payload.get("host") or "").strip()
+        vpn_ip = (payload.get("vpn_ip") or "").strip()
+        ts = (payload.get("ts") or "").strip()
+
+        try:
+            with _db_connect() as conn:
+                if not username and vpn_ip:
+                    username = _resolve_username_by_vpn_ip(conn, vpn_ip)
+
+                if not username:
+                    _log(
+                        f"Webhook accepted (no username) from={self.client_address[0]!r} host={host!r} vpn_ip={vpn_ip!r} signature={signature!r}"
+                    )
+                    self.send_response(202)
+                    self.end_headers()
+                    self.wfile.write(b"Accepted (no username)\n")
+                    return
+
+                base_reason = f"DPI: {signature}".strip() if signature else "DPI: policy violation"
+                ctx = []
+                if host:
+                    ctx.append(f"host={host}")
+                if vpn_ip:
+                    ctx.append(f"ip={vpn_ip}")
+                if ts:
+                    ctx.append(f"ts={ts}")
+                reason = base_reason + (f" ({', '.join(ctx)})" if ctx else "")
+                expires_at = _upsert_block(conn, username=username, reason=reason)
+        except Exception:
+            _log(
+                f"Webhook DB error from={self.client_address[0]!r} user={username!r} host={host!r} vpn_ip={vpn_ip!r} signature={signature!r}"
+            )
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(b"DB error\n")
+            return
+
+        _log(f"Blocked username={username!r} until={_iso_utc(expires_at)} reason={base_reason!r}")
+
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "username": username,
+                    "blocked_until_utc": _iso_utc(expires_at) if expires_at else "",
+                }
+            ).encode("utf-8")
+            + b"\n"
+        )
+
+    def log_message(self, fmt, *args):
+        return
+
+
+def main():
+    server = ThreadingHTTPServer((LISTEN_IP, LISTEN_PORT), Handler)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

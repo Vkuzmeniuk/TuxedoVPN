@@ -1,0 +1,146 @@
+---
+# Issue RadSec client certificates for VPN hosts (radsecproxy).
+#
+# Input variables:
+# - radsec_client_host: inventory hostname of the VPN host
+# - radsec_pki_ca_host: CA host (mgmt)
+# - radsec_ca_cert_pem: CA certificate contents (PEM)
+
+- name: Ensure OpenSSL is installed on {{ radsec_client_host }}
+  ansible.builtin.package:
+    name: openssl
+    state: present
+  delegate_to: "{{ radsec_client_host }}"
+
+- name: Ensure RadSec client TLS directory exists on {{ radsec_client_host }}
+  ansible.builtin.file:
+    path: /etc/tuxedovpn/pki/radsecproxy
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  delegate_to: "{{ radsec_client_host }}"
+
+- name: Install RadSec CA certificate on {{ radsec_client_host }}
+  ansible.builtin.copy:
+    dest: /etc/tuxedovpn/pki/radsecproxy/ca.crt
+    content: "{{ radsec_ca_cert_pem }}"
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+  delegate_to: "{{ radsec_client_host }}"
+
+- name: Ensure RadSec CA file permissions on {{ radsec_client_host }}
+  ansible.builtin.file:
+    path: /etc/tuxedovpn/pki/radsecproxy/ca.crt
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ radsec_client_host }}"
+
+- name: Check if RadSec client certificate already exists on {{ radsec_client_host }}
+  ansible.builtin.stat:
+    path: /etc/tuxedovpn/pki/radsecproxy/client.crt
+  register: _radsec_client_cert_stat
+  changed_when: false
+  delegate_to: "{{ radsec_client_host }}"
+
+- name: Check if RadSec client private key already exists on {{ radsec_client_host }}
+  ansible.builtin.stat:
+    path: /etc/tuxedovpn/pki/radsecproxy/client.key
+  register: _radsec_client_key_stat
+  changed_when: false
+  delegate_to: "{{ radsec_client_host }}"
+
+- name: Fail when RadSec client certificate exists without private key on {{ radsec_client_host }}
+  ansible.builtin.assert:
+    that:
+      - not (_radsec_client_cert_stat.stat.exists | default(false)) or (_radsec_client_key_stat.stat.exists | default(false))
+    fail_msg: >-
+      RadSec client certificate exists at /etc/tuxedovpn/pki/radsecproxy/client.crt but the private key is missing at
+      /etc/tuxedovpn/pki/radsecproxy/client.key on {{ radsec_client_host }}. Restore the key, or remove the certificate
+      to let Ansible re-issue a new one.
+  delegate_to: "{{ radsec_client_host }}"
+
+- name: Generate RadSec client private key on {{ radsec_client_host }} (first run)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    openssl genrsa -out /etc/tuxedovpn/pki/radsecproxy/client.key 4096
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ radsec_client_host }}"
+  when:
+    - not (_radsec_client_cert_stat.stat.exists | default(false))
+    - not (_radsec_client_key_stat.stat.exists | default(false))
+  no_log: true
+
+- name: Generate RadSec client CSR on {{ radsec_client_host }} (first run)
+  ansible.builtin.command: >
+    openssl req -new
+    -key /etc/tuxedovpn/pki/radsecproxy/client.key
+    -subj "/CN={{ radsec_client_host }}"
+    -out /etc/tuxedovpn/pki/radsecproxy/client.csr
+  delegate_to: "{{ radsec_client_host }}"
+  when: not (_radsec_client_cert_stat.stat.exists | default(false))
+
+- name: Read RadSec client CSR from {{ radsec_client_host }} (first run)
+  ansible.builtin.slurp:
+    path: /etc/tuxedovpn/pki/radsecproxy/client.csr
+  register: _radsec_client_csr_slurp
+  delegate_to: "{{ radsec_client_host }}"
+  when: not (_radsec_client_cert_stat.stat.exists | default(false))
+  changed_when: false
+
+- name: Stage RadSec client CSR for {{ radsec_client_host }} on CA host (first run)
+  ansible.builtin.copy:
+    dest: "/tmp/tuxedovpn-radsec-client-{{ radsec_client_host | regex_replace('[^A-Za-z0-9_.-]', '_') }}.csr"
+    content: "{{ _radsec_client_csr_slurp.content | b64decode }}"
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ radsec_pki_ca_host }}"
+  when: not (_radsec_client_cert_stat.stat.exists | default(false))
+
+- name: Sign RadSec client certificate for {{ radsec_client_host }} on CA host (first run)
+  ansible.builtin.command: >
+    openssl x509 -req
+    -in /tmp/tuxedovpn-radsec-client-{{ radsec_client_host | regex_replace('[^A-Za-z0-9_.-]', '_') }}.csr
+    -CA /etc/tuxedovpn/pki/radsec-ca/ca.crt
+    -CAkey /etc/tuxedovpn/pki/radsec-ca/ca.key
+    -CAcreateserial
+    -CAserial /etc/tuxedovpn/pki/radsec-ca/ca.srl
+    -out /tmp/tuxedovpn-radsec-client-{{ radsec_client_host | regex_replace('[^A-Za-z0-9_.-]', '_') }}.crt
+    -days 825 -sha256
+  delegate_to: "{{ radsec_pki_ca_host }}"
+  when: not (_radsec_client_cert_stat.stat.exists | default(false))
+  no_log: true
+
+- name: Read signed RadSec client certificate for {{ radsec_client_host }} (first run)
+  ansible.builtin.slurp:
+    path: "/tmp/tuxedovpn-radsec-client-{{ radsec_client_host | regex_replace('[^A-Za-z0-9_.-]', '_') }}.crt"
+  register: _radsec_client_cert_slurp
+  delegate_to: "{{ radsec_pki_ca_host }}"
+  when: not (_radsec_client_cert_stat.stat.exists | default(false))
+  changed_when: false
+
+- name: Install RadSec client certificate on {{ radsec_client_host }} (first run)
+  ansible.builtin.copy:
+    dest: /etc/tuxedovpn/pki/radsecproxy/client.crt
+    content: "{{ _radsec_client_cert_slurp.content | b64decode }}"
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ radsec_client_host }}"
+  when: not (_radsec_client_cert_stat.stat.exists | default(false))
+
+- name: Ensure RadSec client key permissions on {{ radsec_client_host }}
+  ansible.builtin.file:
+    path: /etc/tuxedovpn/pki/radsecproxy/client.key
+    owner: root
+    group: root
+    mode: "0600"
+  delegate_to: "{{ radsec_client_host }}"
+  when:
+    - (_radsec_client_key_stat.stat.exists | default(false)) or (not (_radsec_client_cert_stat.stat.exists | default(false)))

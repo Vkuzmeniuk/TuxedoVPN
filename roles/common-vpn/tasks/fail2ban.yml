@@ -1,0 +1,66 @@
+---
+- name: Ensure ocserv log file exists
+  ansible.builtin.file:
+    path: "{{ vpn_log_file }}"
+    state: touch
+    owner: root
+    group: root
+    mode: "0640"
+  tags: ['ocserv', 'fail2ban']
+
+- name: Install logrotate rule for ocserv log
+  ansible.builtin.template:
+    src: logrotate-ocserv.j2
+    dest: /etc/logrotate.d/ocserv
+    owner: root
+    group: root
+    mode: "0644"
+  tags: ['ocserv', 'fail2ban']
+
+- name: Configure fail2ban for ocserv (when enabled)
+  when: common_fail2ban_enable | default(false) | bool
+  tags: ['ocserv', 'fail2ban']
+  block:
+    - name: Determine fail2ban banaction from firewall backend (fallback)
+      ansible.builtin.set_fact:
+        common_fail2ban_banaction: >-
+          {{
+            'ufw'
+            if (common_firewall_backend_effective | default('ufw')) == 'ufw'
+            else (
+              'firewallcmd-ipset'
+              if (common_firewall_backend_effective | default('ufw')) == 'firewalld'
+              else 'iptables-multiport'
+            )
+          }}
+      when: common_fail2ban_banaction is not defined
+
+    - name: Ensure fail2ban directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /etc/fail2ban/filter.d
+        - /etc/fail2ban/jail.d
+
+    - name: Deploy ocserv fail2ban filter
+      ansible.builtin.template:
+        src: fail2ban-filter-ocserv.conf.j2
+        dest: /etc/fail2ban/filter.d/ocserv.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart fail2ban
+
+    - name: Deploy ocserv fail2ban jail
+      ansible.builtin.template:
+        src: fail2ban-jail-ocserv.local.j2
+        dest: /etc/fail2ban/jail.d/ocserv.local
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart fail2ban
+

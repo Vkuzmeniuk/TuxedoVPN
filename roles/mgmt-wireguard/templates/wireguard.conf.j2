@@ -1,0 +1,52 @@
+{#
+ WireGuard configuration template for the management tunnel (wg-mgmt).
+ Rendered by the ``mgmt-wireguard`` role for the mgmt host and for each VPN node.
+ The template adjusts peer sections depending on which side of the tunnel the play runs on.
+
+ On the mgmt host:
+ - listen on ``mgmt_wireguard_port``
+ - add PostUp/PostDown routes for each VPN client network
+ - create a peer section for each VPN node
+
+ On VPN nodes:
+ - set ``Endpoint`` to mgmt
+ - create a single peer section
+#}
+
+[Interface]
+Address = {{ mgmt_wireguard_wireguard_address_effective }}
+PrivateKey = {{ mgmt_wireguard_wireguard_private_key }}
+{% if mgmt_wireguard_mgmt_group in group_names %}
+# On the mgmt host disable kernel routing table (Table = off) and listen on the
+# configured UDP port. Static routes are added/removed via PostUp/PostDown
+# for each VPN client network.
+Table = off
+ListenPort = {{ mgmt_wireguard_port }}
+
+{% for peer in (mgmt_wireguard_vpn_peers | default(mgmt_wireguard_vpn_data)) %}
+PostUp = ip route replace {{ peer.network }}/{{ peer.prefix_length }} dev {{ mgmt_wireguard_interface }}
+PostDown = ip route del {{ peer.network }}/{{ peer.prefix_length }} dev {{ mgmt_wireguard_interface }}
+{% endfor %}
+
+{# Create a peer section for each VPN node.
+   Each peer is allowed to send traffic from its VPN client subnet
+   and from its WireGuard IP. We do not set PersistentKeepalive here because
+   mgmt hosts do not initiate periodic keepalives. #}
+{% for peer in (mgmt_wireguard_vpn_peers | default(mgmt_wireguard_vpn_data)) %}
+
+[Peer]
+PublicKey = {{ peer.public_key | default(hostvars[peer.name].mgmt_wireguard_wireguard_public_key) }}
+AllowedIPs = {{ peer.network }}/{{ peer.prefix_length }},{{ peer.wg_ip | default(hostvars[peer.name].mgmt_wireguard_wireguard_ip) }}/32
+{% endfor %}
+
+{% else %}
+# On VPN nodes set Endpoint to mgmt. Set PersistentKeepalive
+# so NAT keeps the session alive. For the peer, allow only the mgmt WireGuard IP.
+
+[Peer]
+PublicKey = {{ mgmt_wireguard_mgmt_public_key | default(hostvars[mgmt_wireguard_mgmt_host].mgmt_wireguard_wireguard_public_key) }}
+Endpoint = {{ mgmt_wireguard_mgmt_public_ip }}:{{ mgmt_wireguard_port }}
+AllowedIPs = {{ mgmt_wireguard_mgmt_ip }}/32
+PersistentKeepalive = {{ mgmt_wireguard_persistent_keepalive }}
+
+{% endif %}

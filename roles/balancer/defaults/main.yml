@@ -1,0 +1,8 @@
+balancer_frontend_bind: "*:443"
+balancer_balance_algorithm: "roundrobin"
+balancer_backend_port: 443
+balancer_backend_send_proxy: true
+balancer_timeout_connect: "5s"
+balancer_timeout_client: "50s"
+balancer_timeout_server: "50s"
+balancer_maxconn: 2048

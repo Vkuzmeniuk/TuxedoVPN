@@ -1,0 +1,11 @@
+vpn_cert_use_existing: true
+vpn_listen_proxy_proto: false
+private_vpn_camouflage_enabled: true
+private_vpn_camouflage_realm: "Restricted Content"
+vpn_camouflage_enabled: true
+vpn_dns_servers:
+  - "8.8.8.8"
+  - "1.1.1.1"
+common_vpn_exporter_static_labels:
+  vpn_role: "private"
+common_vpn_template_src: "{{ playbook_dir }}/roles/private-vpn/templates/ocserv.conf.j2"

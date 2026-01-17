@@ -1,0 +1,108 @@
+{%
+  set auth_ips =
+    freeradius_listen_auth_ips
+    | default([freeradius_listen_auth_ip | default('127.0.0.1')], true)
+%}
+{% set auth_port = freeradius_listen_auth_port | default(1812) %}
+{%
+  set acct_ips =
+    freeradius_listen_acct_ips
+    | default([freeradius_listen_acct_ip | default(auth_ips[0])], true)
+%}
+{% set acct_port = freeradius_listen_acct_port | default(1813) %}
+{% set vpn_authorize_lines = [] %}
+{# Always available; returns ok when functionality is disabled. #}
+{% set _ = vpn_authorize_lines.append('        enforce_admin_only_nas') %}
+{% if freeradius_enable_blocklist | default(false) | bool %}
+{%   set _ = vpn_authorize_lines.append('        check_vpn_blocklist') %}
+{% endif %}
+{% set _policies_expected = (freeradius_enable_blocklist | default(false) | bool)
+                             or (freeradius_enable_simultaneous_use | default(false) | bool)
+                             or (freeradius_enable_daily_quota | default(false) | bool) %}
+{% if _policies_expected %}
+{%   set _ = vpn_authorize_lines.append('        enforce_vpn_limits') %}
+{% endif %}
+server default {
+{% for ip in auth_ips %}
+    listen {
+        type = auth
+        ipaddr = {{ ip }}
+        port = {{ auth_port }}
+    }
+{% endfor %}
+
+{% for ip in acct_ips %}
+    listen {
+        type = acct
+        ipaddr = {{ ip }}
+        port = {{ acct_port }}
+    }
+{% endfor %}
+
+    authorize {
+        filter_username
+        chap
+        mschap
+        suffix
+        update control {
+            &Proxy-To-Realm := LOCAL
+        }
+        files
+        sql
+{% for line in vpn_authorize_lines %}
+{{ line }}
+{% endfor %}
+        expiration
+        logintime
+        pap
+    }
+
+    authenticate {
+        Auth-Type PAP {
+            pap
+        }
+
+        Auth-Type CHAP {
+            chap
+        }
+
+        Auth-Type MS-CHAP {
+            mschap
+        }
+
+        mschap
+    }
+
+    accounting {
+        update request {
+            Acct-Unique-Session-Id := "%{md5:%{User-Name}:%{Acct-Session-Id}:%{NAS-IP-Address}}"
+            &Tmp-String-0 := "Generated Acct-Unique-Session-Id: %{Acct-Unique-Session-Id}"
+        }
+        sql
+    }
+
+    session {
+        radutmp
+    }
+
+    post-auth {
+        sql
+{% if (freeradius_acct_interim_interval | default(0) | int) > 0 %}
+        update reply {
+            Acct-Interim-Interval := {{ freeradius_acct_interim_interval | int }}
+        }
+{% endif %}
+    }
+
+    pre-proxy {
+        # reserved for proxy pre-processing (if needed)
+    }
+
+    post-proxy {
+        # reserved for proxy post-processing (if needed)
+    }
+
+    reply {
+        # reserved for explicit reply customization (if needed)
+    }
+}

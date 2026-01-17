@@ -1,0 +1,146 @@
+freeradius_db_name: radius
+freeradius_db_user: radius
+freeradius_db_password: "{{ vault_freeradius_db_password | default('change_me_radius_db') }}"
+freeradius_db_host: "localhost"
+freeradius_db_port: 5432
+freeradius_client_secret: "{{ radius_shared_secret | default(vault_radius_shared_secret | default('change_me_radius_secret')) }}"
+freeradius_listen_auth_ip: "127.0.0.1"
+freeradius_listen_auth_port: 1812
+freeradius_listen_acct_ip: "{{ freeradius_listen_auth_ip }}"
+freeradius_listen_acct_port: 1813
+freeradius_listen_auth_ips: []
+freeradius_listen_acct_ips: []
+freeradius_manage_localhost_client: true
+freeradius_localhost_client_addr: "127.0.0.1"
+freeradius_localhost_client_name: "localhost"
+freeradius_localhost_require_message_authenticator: false
+freeradius_sql_dialect: "postgresql"
+freeradius_sql_max_connections: 20
+freeradius_sql_spare_servers: 10
+freeradius_sql_acct_table1: "radacct"
+freeradius_sql_acct_table2: "radacct"
+freeradius_sql_postauth_table: "radpostauth"
+freeradius_sql_authcheck_table: "radcheck"
+freeradius_sql_groupcheck_table: "radgroupcheck"
+freeradius_sql_authreply_table: "radreply"
+freeradius_sql_groupreply_table: "radgroupreply"
+freeradius_sql_usergroup_table: "radusergroup"
+freeradius_sql_read_groups: true
+freeradius_sql_read_profiles: true
+freeradius_sql_delete_stale_sessions: true
+freeradius_sql_pool_start: "${thread[pool].start_servers}"
+freeradius_sql_pool_min: "${thread[pool].min_spare_servers}"
+freeradius_sql_pool_max: "${thread[pool].max_servers}"
+freeradius_sql_pool_spare: "${thread[pool].max_spare_servers}"
+freeradius_sql_pool_uses: 0
+freeradius_sql_pool_retry_delay: 30
+freeradius_sql_pool_lifetime: 0
+freeradius_sql_pool_idle_timeout: 60
+freeradius_sql_pool_max_retries: 5
+freeradius_sql_read_clients: true
+freeradius_sql_client_table: "nas"
+freeradius_sql_group_attribute: "SQL-Group"
+freeradius_sql_check_radios: false
+freeradius_sql_allow_vulnerable_sql_auth: true
+freeradius_nas_default_description: "Managed by Ansible"
+freeradius_nas_include_virtual_server: false
+freeradius_manage_vpn_user: true
+# Fail fast if the managed VPN user cannot authenticate in RADIUS.
+freeradius_validate_vpn_user: true
+
+# RADIUS user grouping (SQL `radusergroup`). Useful for Pi-hole sync
+# and access control policies.
+freeradius_default_group_name: "default"
+freeradius_admin_group_name: "admins"
+freeradius_user_group_assignments: []
+
+# Additional RADIUS users managed via SQL (radcheck).
+# Item format: { username: "...", password: "..." }
+freeradius_extra_users: []
+
+# Optional access control: restrict selected NAS clients (by shortname/IP)
+# to users from `freeradius_admin_group_name` only (e.g. mgmt/private VPN via localhost).
+freeradius_admin_only_nas_enforce: false
+freeradius_admin_only_nas_shortnames: []
+freeradius_admin_only_nas_ips: []
+
+# Dedicated radtest user (to avoid false failures when the managed user is currently blocklisted).
+freeradius_radtest_selftest_username: "__tuxedovpn_radtest__"
+freeradius_radtest_selftest_password: "radtest-selftest"
+
+# Verify that the FreeRADIUS policy actually checks `vpn_user_blocklist`.
+freeradius_validate_blocklist: true
+freeradius_blocklist_selftest_username: "__tuxedovpn_blocklist_selftest__"
+freeradius_blocklist_selftest_password: "blocklist-selftest"
+freeradius_blocklist_selftest_block_seconds: 120
+
+freeradius_radtest_server: "{{ freeradius_localhost_client_addr }}"
+freeradius_radtest_nas_port: 10
+freeradius_radtest_nas_ip: "{{ freeradius_localhost_client_addr }}"
+freeradius_radtest_retries: 5
+freeradius_radtest_delay: 3
+freeradius_extra_clients: []
+freeradius_radacct_cleanup_enable: true
+freeradius_radacct_cleanup_before_test: true
+freeradius_radacct_cleanup_script_path: "/usr/local/bin/freeradius_radacct_cleanup.sh"
+freeradius_radacct_cleanup_max_age: "2 hours"
+freeradius_radacct_cleanup_log_tag: "freeradius-radacct-cleanup"
+freeradius_radacct_cleanup_cron:
+  minute: "*/15"
+  hour: "*"
+  day: "*"
+  month: "*"
+  weekday: "*"
+freeradius_allowed_db_cidrs: ['127.0.0.1/32']
+freeradius_schema_sentinel: "/var/lib/postgresql/.freeradius_schema_loaded"
+freeradius_pg_service_name: postgresql
+freeradius_radius_service_name: freeradius
+freeradius_conf_dir: "/etc/freeradius/3.0"
+freeradius_manage_repo: false
+freeradius_apt_repo: "ppa:freeradius/stable"
+freeradius_prometheus_enable: true
+freeradius_prometheus_listen_ip: "127.0.0.1"
+freeradius_prometheus_listen_port: 9812
+freeradius_prometheus_allowed_cidrs:
+  - "127.0.0.1/32"
+freeradius_prometheus_extra_config: ""
+freeradius_prometheus_module_path: "/usr/lib/freeradius/rlm_prometheus.so"
+freeradius_prometheus_module_path_candidates:
+  - "{{ freeradius_prometheus_module_path }}"
+  - "/usr/lib/freeradius/3.0/rlm_prometheus.so"
+  - "/usr/lib/freeradius/4.0/rlm_prometheus.so"
+  - "/usr/lib/x86_64-linux-gnu/freeradius/3.0/rlm_prometheus.so"
+  - "/usr/lib/aarch64-linux-gnu/freeradius/3.0/rlm_prometheus.so"
+  - "/usr/lib64/freeradius/rlm_prometheus.so"
+
+# Fallback when rlm_prometheus is not packaged: query FreeRADIUS Status-Server
+# on localhost and expose a Prometheus endpoint on freeradius_prometheus_listen_ip:port.
+freeradius_status_listen_ip: "127.0.0.1"
+freeradius_status_listen_port: 18121
+freeradius_status_secret: "{{ radius_shared_secret }}"
+freeradius_status_exporter_enable: true
+freeradius_enable_simultaneous_use: true
+freeradius_default_simultaneous_use: 0
+freeradius_enable_daily_quota: false
+freeradius_daily_quota_attribute: "Max-Daily-Data"
+freeradius_enable_blocklist: true
+
+# Export per-user traffic statistics (radacct) for Prometheus/Grafana.
+freeradius_accounting_exporter_enable: false
+freeradius_accounting_exporter_listen_ip: "127.0.0.1"
+freeradius_accounting_exporter_listen_port: 9814
+freeradius_accounting_exporter_metrics_path: "/metrics"
+freeradius_accounting_exporter_top_n: 0
+freeradius_accounting_exporter_split_by_nas: false
+freeradius_accounting_exporter_user: "postgres"
+freeradius_accounting_exporter_group: "postgres"
+freeradius_accounting_exporter_connect_timeout: 2
+freeradius_accounting_exporter_statement_timeout: 5
+
+# Request Interim-Update accounting packets from NAS (seconds). This enables near real-time
+# traffic accounting in radacct when the NAS supports it.
+freeradius_acct_interim_interval: 0
+
+# Enable extra diagnostics when radtest validation fails (print logs and sanitized
+# radtest output). Disabled by default to avoid log noise.
+freeradius_debug: false

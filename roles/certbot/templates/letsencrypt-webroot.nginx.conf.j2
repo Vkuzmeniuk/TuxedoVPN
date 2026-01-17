@@ -1,0 +1,17 @@
+# Managed by Ansible (role: certbot)
+# Minimal HTTP server for ACME HTTP-01 challenge.
+
+server {
+    listen 80;
+    server_name _;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root {{ certbot_webroot_path }};
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+    location / {
+        return 404;
+    }
+}

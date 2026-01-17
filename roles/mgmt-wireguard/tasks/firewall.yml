@@ -1,0 +1,67 @@
+---
+# UFW rules to allow mgmt<->vpn service traffic only via wg-mgmt.
+
+- name: Allow RADIUS from VPN nodes via WireGuard only (mgmt)
+  become: true
+  block:
+    - name: Build VPN public/LAN source IP list (legacy cleanup)
+      ansible.builtin.set_fact:
+        _mgmt_wireguard_legacy_vpn_src_ips: >-
+          {{
+            (mgmt_wireguard_vpn_data | default([]))
+            | map(attribute='ansible_host')
+            | select('defined')
+            | map('trim')
+            | select('match', '^\\S+$')
+            | list
+            | unique
+          }}
+      changed_when: false
+
+    - name: Remove legacy RADIUS allow rules from VPN public/LAN IPs (cleanup)
+      community.general.ufw:
+        rule: allow
+        port: "{{ freeradius_listen_auth_port | default(1812) }}"
+        proto: udp
+        direction: in
+        src: "{{ item }}"
+        delete: true
+      loop: "{{ _mgmt_wireguard_legacy_vpn_src_ips | default([]) }}"
+      when: (_mgmt_wireguard_legacy_vpn_src_ips | default([]) | length) > 0
+
+    - name: Remove legacy RADIUS accounting allow rules from VPN public/LAN IPs (cleanup)
+      community.general.ufw:
+        rule: allow
+        port: "{{ freeradius_listen_acct_port | default(1813) }}"
+        proto: udp
+        direction: in
+        src: "{{ item }}"
+        delete: true
+      loop: "{{ _mgmt_wireguard_legacy_vpn_src_ips | default([]) }}"
+      when: (_mgmt_wireguard_legacy_vpn_src_ips | default([]) | length) > 0
+
+    - name: Allow RADIUS auth (1812/udp) from VPN WireGuard IPs on wg-mgmt
+      community.general.ufw:
+        rule: allow
+        port: "{{ freeradius_listen_auth_port | default(1812) }}"
+        proto: udp
+        direction: in
+        interface: "{{ mgmt_wireguard_interface }}"
+        src: "{{ item.wg_ip }}"
+      loop: "{{ mgmt_wireguard_vpn_peers | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: (mgmt_wireguard_vpn_peers | default([]) | length) > 0
+
+    - name: Allow RADIUS acct (1813/udp) from VPN WireGuard IPs on wg-mgmt
+      community.general.ufw:
+        rule: allow
+        port: "{{ freeradius_listen_acct_port | default(1813) }}"
+        proto: udp
+        direction: in
+        interface: "{{ mgmt_wireguard_interface }}"
+        src: "{{ item.wg_ip }}"
+      loop: "{{ mgmt_wireguard_vpn_peers | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: (mgmt_wireguard_vpn_peers | default([]) | length) > 0

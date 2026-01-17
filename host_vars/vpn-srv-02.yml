@@ -1,0 +1,9 @@
+# TLS mode for this host.
+# To enable Certbot/Let’s Encrypt, set `tuxedovpn_tls_mode: "certbot"`.
+tuxedovpn_tls_mode: "selfsigned" # selfsigned | certbot
+vpn_domain: "vpn-02.example.com"
+vpn_network_address: "10.66.2.0"
+vpn_network_prefix_length: 24
+
+# ocserv camouflage (example value; set something unique per host)
+vpn_camouflage_secret_override: "change_me_camouflage_vpn_02"

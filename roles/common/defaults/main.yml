@@ -1,0 +1,12 @@
+---
+# Disable fail2ban during initial bootstrap to reduce the risk of lockouts
+# while establishing connectivity and SSH. Enable explicitly later.
+common_fail2ban_enable: false
+
+# Ensure the host's hostname resolves locally (prevents issues with sudo/radtest
+# when DNS is not configured yet).
+common_ensure_hostname_resolves: true
+
+# Manage admin_user password to allow SSH password logins.
+admin_user_manage_password: false
+admin_user_password_plain: ""

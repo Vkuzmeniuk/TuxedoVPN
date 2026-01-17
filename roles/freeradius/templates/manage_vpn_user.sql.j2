@@ -1,0 +1,49 @@
+{% set username = freeradius_managed_vpn_username | replace("'", "''") %}
+{% set password = freeradius_managed_vpn_password | replace("'", "''") %}
+WITH desired AS (
+    SELECT '{{ username }}'::text AS username,
+           '{{ password }}'::text AS password
+),
+existing AS (
+    SELECT id, value
+      FROM radcheck
+     WHERE username = (SELECT username FROM desired)
+       AND attribute = 'Cleartext-Password'
+       AND op = ':='
+),
+keeper AS (
+    SELECT id
+      FROM existing
+     ORDER BY id
+     LIMIT 1
+),
+duplicates AS (
+    DELETE FROM radcheck
+     WHERE username = (SELECT username FROM desired)
+       AND attribute = 'Cleartext-Password'
+       AND op = ':='
+       AND id <> COALESCE((SELECT id FROM keeper), -1)
+    RETURNING 1
+),
+updated AS (
+    UPDATE radcheck
+       SET value = (SELECT password FROM desired)
+     WHERE id = (SELECT id FROM keeper)
+       AND value <> (SELECT password FROM desired)
+    RETURNING 1
+),
+inserted AS (
+    INSERT INTO radcheck (username, attribute, op, value)
+    SELECT d.username, 'Cleartext-Password', ':=', d.password
+      FROM desired d
+     WHERE NOT EXISTS (SELECT 1 FROM keeper)
+    RETURNING 1
+)
+SELECT 'USER_SYNC=' ||
+       CASE
+         WHEN EXISTS (SELECT 1 FROM duplicates)
+           OR EXISTS (SELECT 1 FROM updated)
+           OR EXISTS (SELECT 1 FROM inserted)
+         THEN '1'
+         ELSE '0'
+       END;

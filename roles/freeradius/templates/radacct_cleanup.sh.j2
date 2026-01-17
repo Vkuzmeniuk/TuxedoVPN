@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+
+DB_NAME="{{ freeradius_db_name }}"
+MAX_AGE="{{ freeradius_radacct_cleanup_max_age }}"
+LOG_TAG="{{ freeradius_radacct_cleanup_log_tag }}"
+
+PSQL() {
+  psql -d "${DB_NAME}" -v ON_ERROR_STOP=1 -At -c "$1"
+}
+
+before_count=$(PSQL "SELECT COUNT(*) FROM radacct WHERE acctstoptime IS NULL;")
+deleted_count=$(PSQL "WITH deleted AS (
+    DELETE FROM radacct
+     WHERE acctstoptime IS NULL
+       AND acctstarttime < NOW() - interval '${MAX_AGE}'
+    RETURNING 1
+  )
+  SELECT COUNT(*) FROM deleted;")
+after_count=$(PSQL "SELECT COUNT(*) FROM radacct WHERE acctstoptime IS NULL;")
+
+logger -t "${LOG_TAG}" "before=${before_count} deleted=${deleted_count} remaining=${after_count}"

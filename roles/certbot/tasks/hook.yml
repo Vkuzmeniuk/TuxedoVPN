@@ -1,0 +1,61 @@
+---
+- name: Ensure Certbot deploy hook directory exists
+  ansible.builtin.file:
+    path: "{{ certbot_deploy_hook_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: certbot_deploy_hook_enable | bool
+
+- name: Install Certbot deploy hook (restart services)
+  ansible.builtin.template:
+    src: deploy-hook.sh.j2
+    dest: "{{ certbot_deploy_hook_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  vars:
+    _certbot_deploy_hook_services: "{{ certbot_deploy_hook_services | default([]) }}"
+  when: certbot_deploy_hook_enable | bool
+
+- name: Ensure Certbot standalone renew hook directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ certbot_standalone_renew_pre_hook_path | dirname }}"
+    - "{{ certbot_standalone_renew_post_hook_path | dirname }}"
+  when:
+    - (certbot_method | default('')) == "standalone"
+    - certbot_standalone_install_renew_hooks | default(true) | bool
+    - (certbot_standalone_stop_services | default([]) | length) > 0
+
+- name: Install Certbot standalone pre-hook (stop services)
+  ansible.builtin.template:
+    src: standalone-pre-hook.sh.j2
+    dest: "{{ certbot_standalone_renew_pre_hook_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  vars:
+    _certbot_standalone_stop_services: "{{ certbot_standalone_stop_services | default([]) }}"
+  when:
+    - (certbot_method | default('')) == "standalone"
+    - certbot_standalone_install_renew_hooks | default(true) | bool
+    - (certbot_standalone_stop_services | default([]) | length) > 0
+
+- name: Install Certbot standalone post-hook (start services)
+  ansible.builtin.template:
+    src: standalone-post-hook.sh.j2
+    dest: "{{ certbot_standalone_renew_post_hook_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - (certbot_method | default('')) == "standalone"
+    - certbot_standalone_install_renew_hooks | default(true) | bool
+    - (certbot_standalone_stop_services | default([]) | length) > 0

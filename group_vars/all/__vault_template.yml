@@ -1,0 +1,21 @@
+ansible_become_password: "change_me_become_password"
+vault_radius_shared_secret: "change_me_radius_secret"
+vault_freeradius_db_password: "change_me_radius_db"
+vault_vpn_default_user_password: "change_me_vpn_password"
+vault_vpn_user1_password: "change_me_user1_password"
+# Optional. If empty, the playbook will generate a token on the mgmt host
+# and distribute it to VPN nodes via a webhook reachable only over WireGuard.
+vault_dpi_webhook_token: ""
+
+# Certbot / Let’s Encrypt (recommended for real certificates)
+# Used by the `roles/certbot` role (invoked directly or by other roles when cert files are missing).
+vault_certbot_email: "admin@example.com"
+vault_certbot_dns_credentials_ini: |
+  # Example (Cloudflare):
+  # dns_cloudflare_api_token = "change_me"
+  #
+  # Format depends on DNS provider / certbot plugin.
+  # This file will be written to /etc/letsencrypt/dns-credentials.ini with permissions 0600.
+  #
+  # Keep this value in vault.
+  dns_cloudflare_api_token = "change_me"

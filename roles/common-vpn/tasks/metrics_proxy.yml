@@ -1,0 +1,88 @@
+---
+# Expose the local ocserv exporter via an nginx TLS/mTLS reverse proxy.
+
+- name: Derive nginx listen IP for exporter proxy
+  ansible.builtin.set_fact:
+    common_vpn_exporter_proxy_listen_ip_effective: >-
+      {{
+        (common_vpn_exporter_proxy_listen_ip | default('') | trim)
+        | default(ansible_default_ipv4.address | default(ansible_host | default('')), true)
+      }}
+
+- name: Validate nginx listen IP for exporter proxy
+  ansible.builtin.assert:
+    that:
+      - common_vpn_exporter_proxy_listen_ip_effective | default('') | trim | length > 0
+      - common_vpn_exporter_proxy_listen_ip_effective | trim not in ['0.0.0.0', '127.0.0.1']
+    fail_msg: >-
+      common_vpn_exporter_proxy_listen_ip_effective resolved to "{{ common_vpn_exporter_proxy_listen_ip_effective | default('') }}".
+      Set common_vpn_exporter_proxy_listen_ip to a non-loopback IP to avoid a port bind conflict with
+      the exporter (which listens on 127.0.0.1:{{ common_vpn_exporter_listen_port }}).
+
+- name: Ensure nginx is installed
+  ansible.builtin.package:
+    name: nginx
+    state: present
+
+- name: Ensure metrics PKI directory exists
+  ansible.builtin.file:
+    path: "{{ common_vpn_exporter_proxy_tls_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: common_vpn_exporter_proxy_tls_enable | bool
+
+- name: Validate exporter proxy TLS files exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _common_vpn_exporter_proxy_tls_stat
+  loop:
+    - "{{ common_vpn_exporter_proxy_tls_cert_file }}"
+    - "{{ common_vpn_exporter_proxy_tls_key_file }}"
+  when: common_vpn_exporter_proxy_tls_enable | bool
+
+- name: Fail when exporter proxy TLS files are missing
+  ansible.builtin.assert:
+    that:
+      - (_common_vpn_exporter_proxy_tls_stat.results | selectattr('stat.exists', 'equalto', true) | list | length) == (_common_vpn_exporter_proxy_tls_stat.results | length)
+    fail_msg: >-
+      TLS is enabled for the exporter proxy, but one or more TLS files are missing.
+      Provide them as files:
+      - {{ common_vpn_exporter_proxy_tls_cert_file }}
+      - {{ common_vpn_exporter_proxy_tls_key_file }}
+  when: common_vpn_exporter_proxy_tls_enable | bool
+
+- name: Validate exporter proxy mTLS CA file exists (when enabled)
+  ansible.builtin.stat:
+    path: "{{ common_vpn_exporter_proxy_mtls_ca_file }}"
+  register: _common_vpn_exporter_proxy_mtls_ca_stat
+  when:
+    - common_vpn_exporter_proxy_tls_enable | bool
+    - common_vpn_exporter_proxy_mtls_enable | bool
+
+- name: Fail when exporter proxy mTLS CA file is missing
+  ansible.builtin.assert:
+    that:
+      - _common_vpn_exporter_proxy_mtls_ca_stat.stat.exists | default(false)
+    fail_msg: >-
+      mTLS is enabled for the exporter proxy, but the CA file is missing at {{ common_vpn_exporter_proxy_mtls_ca_file }}.
+      Provide it as a file.
+  when:
+    - common_vpn_exporter_proxy_tls_enable | bool
+    - common_vpn_exporter_proxy_mtls_enable | bool
+
+- name: Deploy nginx site for ocserv exporter proxy
+  ansible.builtin.template:
+    src: nginx-ocserv-exporter.conf.j2
+    dest: /etc/nginx/conf.d/ocserv-exporter.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Ensure nginx is enabled and running
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true

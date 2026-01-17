@@ -1,0 +1,102 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+{% if freeradius_prometheus_enable | default(false) | bool %}
+  - job_name: 'freeradius_prometheus'
+    scrape_interval: 15s
+    metrics_path: "/metrics"
+    static_configs:
+      - targets:
+          - "localhost:{{ freeradius_prometheus_listen_port | default(9812) }}"
+{% endif %}
+
+{% if freeradius_accounting_exporter_enable | default(false) | bool %}
+{% set _freeradius_acct_exporter_ip = (freeradius_accounting_exporter_listen_ip | default('127.0.0.1') | trim) %}
+{% set _freeradius_acct_exporter_target = ('localhost' if _freeradius_acct_exporter_ip in ['127.0.0.1', '::1', 'localhost'] else _freeradius_acct_exporter_ip) %}
+  - job_name: 'freeradius_accounting'
+    scrape_interval: 15s
+    metrics_path: "{{ freeradius_accounting_exporter_metrics_path | default('/metrics') }}"
+    static_configs:
+      - targets:
+          - "{{ _freeradius_acct_exporter_target }}:{{ freeradius_accounting_exporter_listen_port | default(9814) }}"
+{% endif %}
+
+{% if radius_pihole_sync_enable | default(false) | bool %}
+  - job_name: 'radius_pihole_sync'
+    scrape_interval: 15s
+    metrics_path: "{{ radius_pihole_sync_metrics_path | default('/metrics') }}"
+    static_configs:
+      - targets:
+          - "localhost:{{ radius_pihole_sync_metrics_listen_port | default(9817) }}"
+{% endif %}
+
+{% if _static_targets | length > 0 %}
+  - job_name: 'nodes_static'
+    static_configs:
+      - targets:
+{%   for t in _static_targets %}
+          - "{{ t }}"
+{%   endfor %}
+{% endif %}
+
+{% for g in _target_groups %}
+{% if g in groups %}
+  - job_name: 'node_{{ g }}'
+    static_configs:
+      - targets:
+{%   for h in groups[g] %}
+{%     set _node_port = (hostvars[h].node_exporter_port | default(9100)) %}
+{%     if h == inventory_hostname %}
+          - "localhost:{{ _node_port }}"
+{%     else %}
+{%       set _prefer_wg = (prometheus_prefer_mgmt_wireguard | default(true) | bool) %}
+{%       set _wg_ip = (hostvars[h].mgmt_wireguard_wireguard_ip | default('') | trim) %}
+{%       set _node_ip = (_wg_ip if _prefer_wg and (_wg_ip | length > 0) else (hostvars[h].ansible_host | default(h))) %}
+          - "{{ _node_ip }}:{{ _node_port }}"
+{%     endif %}
+{%   endfor %}
+        labels:
+          role: "{{ g }}"
+{% endif %}
+{% endfor %}
+
+{% for p in _vpn_target_groups %}
+{% if p in groups %}
+  - job_name: 'ocserv_exporter_{{ p }}'
+    scrape_interval: 5s
+    static_configs:
+      - targets:
+{%   for loc_h in groups[p] %}
+{%     set _prefer_wg = (prometheus_prefer_mgmt_wireguard | default(true) | bool) %}
+{%     set _wg_ip = (hostvars[loc_h].mgmt_wireguard_wireguard_ip | default('') | trim) %}
+{%     set _exporter_ip = (_wg_ip if _prefer_wg and (_wg_ip | length > 0) else (hostvars[loc_h].ansible_host | default(loc_h))) %}
+          - "{{ _exporter_ip }}:{{ hostvars[loc_h].ocserv_exporter_port | default(9813) }}"
+{%   endfor %}
+        labels:
+          role: "{{ p }}"
+{% endif %}
+{% endfor %}
+
+{% for p in _vpn_target_groups %}
+{% if p in groups %}
+  - job_name: 'dpi_agent_{{ p }}'
+    scrape_interval: 5s
+    metrics_path: "/metrics"
+    static_configs:
+      - targets:
+{%   for loc_h in groups[p] %}
+{%     set _prefer_wg = (prometheus_prefer_mgmt_wireguard | default(true) | bool) %}
+{%     set _wg_ip = (hostvars[loc_h].mgmt_wireguard_wireguard_ip | default('') | trim) %}
+{%     set _dpi_ip = (_wg_ip if _prefer_wg and (_wg_ip | length > 0) else (hostvars[loc_h].ansible_host | default(loc_h))) %}
+          - "{{ _dpi_ip }}:{{ hostvars[loc_h].dpi_agent_port | default(dpi_agent_port | default(9815)) }}"
+{%   endfor %}
+        labels:
+          role: "{{ p }}"
+{% endif %}
+{% endfor %}

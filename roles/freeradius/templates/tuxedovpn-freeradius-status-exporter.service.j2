@@ -1,0 +1,32 @@
+[Unit]
+Description=TuxedoVPN FreeRADIUS Status exporter (radclient -> Prometheus)
+After=network-online.target freeradius.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/tuxedovpn_freeradius_status_exporter.py
+Restart=on-failure
+RestartSec=3
+
+Environment="FREERADIUS_STATUS_EXPORTER_LISTEN_HOST={{ freeradius_prometheus_listen_ip | default('127.0.0.1') }}"
+Environment="FREERADIUS_STATUS_EXPORTER_LISTEN_PORT={{ freeradius_prometheus_listen_port | default(9812) }}"
+Environment="FREERADIUS_STATUS_EXPORTER_METRICS_PATH=/metrics"
+Environment="FREERADIUS_STATUS_EXPORTER_STATUS_HOST={{ freeradius_status_listen_ip | default('127.0.0.1') }}"
+Environment="FREERADIUS_STATUS_EXPORTER_STATUS_PORT={{ freeradius_status_listen_port | default(18121) }}"
+Environment="FREERADIUS_STATUS_EXPORTER_STATUS_SECRET={{ freeradius_status_secret | default('adminsecret') | replace('\"', '\\\"') }}"
+Environment="FREERADIUS_STATUS_EXPORTER_RADCLIENT=/usr/bin/radclient"
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

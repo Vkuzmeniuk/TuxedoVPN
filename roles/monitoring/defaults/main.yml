@@ -1,0 +1,9 @@
+---
+# Make Grafana reachable from VPN interfaces; security is enforced via UFW allowlists.
+# Grafana recommends an empty http_addr to bind on all interfaces.
+grafana_http_addr: ""
+grafana_http_port: 3000
+
+# Prefer scraping node/exporter targets via the mgmt<->vpn WireGuard tunnel
+# when `hostvars[<host>].mgmt_wireguard_wireguard_ip` is available.
+prometheus_prefer_mgmt_wireguard: true

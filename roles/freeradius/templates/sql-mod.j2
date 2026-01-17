@@ -1,0 +1,51 @@
+{% set sql_dialect = freeradius_sql_dialect | default('postgresql') %}
+sql {
+    dialect = "{{ sql_dialect }}"
+    driver = "rlm_sql_${dialect}"
+    server = "{{ freeradius_db_host | default('localhost') }}"
+    port = "{{ freeradius_db_port | default(5432) }}"
+    login = "{{ freeradius_db_user }}"
+    password = "{{ freeradius_db_password }}"
+    radius_db = "{{ freeradius_db_name }}"
+    max_connections = {{ freeradius_sql_max_connections | default(20) }}
+    spare_servers = {{ freeradius_sql_spare_servers | default(10) }}
+
+    acct_table1 = "{{ freeradius_sql_acct_table1 | default('radacct') }}"
+    acct_table2 = "{{ freeradius_sql_acct_table2 | default('radacct') }}"
+
+    postauth_table = "{{ freeradius_sql_postauth_table | default('radpostauth') }}"
+
+    authcheck_table = "{{ freeradius_sql_authcheck_table | default('radcheck') }}"
+    groupcheck_table = "{{ freeradius_sql_groupcheck_table | default('radgroupcheck') }}"
+
+    authreply_table = "{{ freeradius_sql_authreply_table | default('radreply') }}"
+    groupreply_table = "{{ freeradius_sql_groupreply_table | default('radgroupreply') }}"
+
+    usergroup_table = "{{ freeradius_sql_usergroup_table | default('radusergroup') }}"
+
+    read_groups = {{ 'yes' if freeradius_sql_read_groups | default(true) | bool else 'no' }}
+    read_profiles = {{ 'yes' if freeradius_sql_read_profiles | default(true) | bool else 'no' }}
+    delete_stale_sessions = {{ 'yes' if freeradius_sql_delete_stale_sessions | default(true) | bool else 'no' }}
+
+    sql_user_name = "{% raw %}%{%{Stripped-User-Name}:-%{User-Name}}{% endraw %}"
+    group_membership_query = "{% raw %}SELECT groupname FROM ${usergroup_table} WHERE username = '%{%{SQL-User-Name}:-%{User-Name}}' ORDER BY priority{% endraw %}"
+
+    pool {
+        start = {{ freeradius_sql_pool_start | default('${thread[pool].start_servers}') }}
+        min = {{ freeradius_sql_pool_min | default('${thread[pool].min_spare_servers}') }}
+        max = {{ freeradius_sql_pool_max | default('${thread[pool].max_servers}') }}
+        spare = {{ freeradius_sql_pool_spare | default('${thread[pool].max_spare_servers}') }}
+        uses = {{ freeradius_sql_pool_uses | default(0) }}
+        retry_delay = {{ freeradius_sql_pool_retry_delay | default(30) }}
+        lifetime = {{ freeradius_sql_pool_lifetime | default(0) }}
+        idle_timeout = {{ freeradius_sql_pool_idle_timeout | default(60) }}
+        max_retries = {{ freeradius_sql_pool_max_retries | default(5) }}
+    }
+
+    read_clients = {{ 'yes' if freeradius_sql_read_clients | default(true) | bool else 'no' }}
+    client_table = "{{ freeradius_sql_client_table | default('nas') }}"
+    group_attribute = "{{ freeradius_sql_group_attribute | default('SQL-Group') }}"
+    check_radios = {{ 'yes' if freeradius_sql_check_radios | default(false) | bool else 'no' }}
+    allow_vulnerable_sql_auth = {{ 'yes' if freeradius_sql_allow_vulnerable_sql_auth | default(true) | bool else 'no' }}
+    $INCLUDE ${modconfdir}/${.:name}/main/${dialect}/queries.conf
+}

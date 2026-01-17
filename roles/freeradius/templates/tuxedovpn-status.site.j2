@@ -1,0 +1,20 @@
+server status {
+    listen {
+        type = status
+        ipaddr = {{ freeradius_status_listen_ip }}
+        port = {{ freeradius_status_listen_port }}
+    }
+
+    client admin {
+        ipaddr = 127.0.0.1
+        secret = "{{ freeradius_status_secret | replace('\"', '\\\"') }}"
+    }
+
+    authorize {
+        ok
+
+        Autz-Type Status-Server {
+            ok
+        }
+    }
+}

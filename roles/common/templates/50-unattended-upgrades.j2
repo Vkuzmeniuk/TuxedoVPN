@@ -1,0 +1,9 @@
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Ubuntu,codename=${distro_codename},label=Ubuntu";
+        "origin=Ubuntu,codename=${distro_codename}-security,label=Ubuntu";
+};
+
+// Keep reporting/reboots minimal
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::MinimalSteps "true";

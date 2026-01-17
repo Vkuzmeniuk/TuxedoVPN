@@ -1,0 +1,47 @@
+ssh_port: 22
+ufw_extra_rules:
+  - { port: 443 }
+  - { port: 1812, proto: udp, direction: out, dest: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
+  - { port: 1813, proto: udp, direction: out, dest: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
+  - { port: 53,   proto: udp, direction: out, dest: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
+  # Allow metrics scraping only from the management server (over WireGuard)
+  - { port: 9813, proto: tcp, direction: in, src: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
+  - { port: 9100, proto: tcp, direction: in, src: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
+  - { port: 9812, proto: tcp, direction: in, src: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
+  - { port: "{{ dpi_agent_port | default(9815) }}", proto: tcp, direction: in, src: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
+
+vpn_cert_use_existing: "{{ (tuxedovpn_tls_mode | default('selfsigned')) == 'certbot' }}"
+vpn_listen_host: "0.0.0.0"
+vpn_listen_proxy_proto: false
+vpn_radius_accounting: true
+vpn_radius_servers:
+  # - host: "{{ hostvars['mgmt-srv-01'].ansible_host | default('mgmt-srv-01') }}"
+  #   auth_port: 1812
+  #   acct_port: 1813
+  #   secret: "{{ radius_shared_secret }}"
+  # Use the management server WireGuard address for auth and accounting
+  - host: "{{ mgmt_wireguard_mgmt_ip }}"
+    auth_port: 1812
+    acct_port: 1813
+    secret: "{{ radius_shared_secret }}"
+vpn_radius_nas_identifier: "{{ inventory_hostname }}"
+vpn_dns_client_ip: "{{ vpn_network_address | regex_replace('\\.0$', '.1') }}"
+vpn_dns_servers:
+  - "{{ mgmt_wireguard_mgmt_ip }}"
+vpn_ipv4_network: "{{ vpn_network_address }}"
+vpn_ipv4_netmask: "255.255.255.0"
+vpn_camouflage_enabled: true
+
+vpn_nat_subnets:
+  - "{{ vpn_network_address }}/{{ vpn_network_prefix_length | default(24) }}"
+
+# Enforce FreeRADIUS blocklist on reconnects:
+# ocserv cookies may allow fast reconnects without a new RADIUS authentication.
+# Set to 0 to force re-auth on every reconnect (recommended when DPI blocklist is enabled).
+vpn_cookie_timeout: 0
+
+# DPI: send VPN forwarded traffic to NFQUEUE (queue 0) for Suricata inspection.
+vpn_enable_mangle: true
+
+# DPI: send events to the mgmt webhook for temporary blocking + Telegram.
+dpi_mgmt_webhook_url: "http://{{ mgmt_wireguard_mgmt_ip }}:9816/event"

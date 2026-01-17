@@ -1,0 +1,197 @@
+prometheus_target_groups:
+  - vpn
+  - mgmt
+
+monitoring_allowed_cidrs:
+  - "192.168.56.0/24"
+  - "0.0.0.0/0"
+  - "::/0"
+
+grafana_enable_freeradius_datasource: true
+grafana_freeradius_datasource_name: "FreeRADIUS"
+grafana_freeradius_datasource_host: "127.0.0.1"
+grafana_freeradius_datasource_port: 5432
+grafana_freeradius_datasource_database: "{{ freeradius_db_name }}"
+grafana_freeradius_datasource_user: "{{ freeradius_db_user }}"
+grafana_freeradius_datasource_sslmode: "disable"
+grafana_freeradius_datasource_postgres_version: 1400
+
+vpn_cert_use_existing: "{{ (tuxedovpn_tls_mode | default('selfsigned')) == 'certbot' }}"
+
+# Authentication is handled by the local FreeRADIUS instance
+vpn_auth_mode: "radius"
+vpn_radius_accounting: true
+vpn_radius_servers:
+  - host: "127.0.0.1"
+    auth_port: 1812
+    acct_port: 1813
+    secret: "{{ radius_shared_secret }}"
+
+# Connection limits
+vpn_max_clients: 0
+vpn_max_same_clients: 0
+
+# Network and DNS
+vpn_ipv4_network: "{{ vpn_network_address }}"
+vpn_ipv4_netmask: "255.255.255.0"
+vpn_ipv4_prefix_length: "{{ vpn_network_prefix_length | default(24) }}"
+vpn_dns_client_ip: "{{ vpn_ipv4_network | regex_replace('\\.0$', '.1') }}"
+vpn_dns_servers:
+  - "{{ vpn_dns_client_ip }}"
+# Split DNS (AnyConnect/OpenConnect): send DNS for selected domains to the VPN DNS server.
+vpn_split_dns_domains: >-
+  {{
+    (
+      [
+        (grafana_domain | default('')),
+        (prometheus_domain | default('')),
+        (pihole_domain | default(''))
+      ]
+      | map('regex_replace', '^\\s+|\\s+$', '')
+      | reject('equalto', '')
+      | list
+      | unique
+    )
+    +
+    (
+      [
+        (grafana_domain | default('')),
+        (prometheus_domain | default('')),
+        (pihole_domain | default(''))
+      ]
+      | map('regex_replace', '^\\s+|\\s+$', '')
+      | reject('equalto', '')
+      | map('regex_replace', '^[^.]+\\.', '')
+      | select('search', '\\.')
+      | list
+      | unique
+    )
+    | unique
+  }}
+
+vpn_nat_subnets:
+  - "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}"
+
+# Split tunneling (mgmt/private VPN):
+# Route only required internal subnets through the tunnel (leave all other traffic local).
+vpn_route_all_traffic: false
+vpn_routes:
+  # Mgmt services live on the mgmt VPN gateway IP (vpn_dns_client_ip) by default.
+  - "{{ vpn_ipv4_network }}/{{ vpn_ipv4_netmask }}"
+  # Add more internal networks here when you need access beyond the mgmt host itself:
+  # - "192.168.56.0/255.255.255.0"
+
+# Pi-hole must answer queries from VPN client subnets that arrive via the mgmt<->vpn WireGuard tunnel
+# (those subnets are not "local" to mgmt), so we enable Pi-hole "permit all origins" mode and rely on
+# UFW allowlisting.
+pihole_dns_permit_all_origins: true
+
+# Restrict Pi-hole Web UI (80/8443) to mgmt VPN clients + localhost.
+pihole_webui_allowed_sources:
+  - "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}"
+  - "127.0.0.1/32"
+
+# HAProxy/PROXY protocol and bind settings
+vpn_listen_proxy_proto: false
+vpn_listen_host: >-
+  {{
+    (mgmt_reverse_proxy_enable | default(false) | bool)
+    | ternary((ansible_default_ipv4.address | default(ansible_host | default('0.0.0.0'))), '0.0.0.0')
+  }}
+vpn_listen_port: 443 
+
+# When the reverse proxy is enabled we bind ocserv to the public IP only, so the
+# local openconnect self-test must use that IP (127.0.0.1 would no longer work).
+vpn_connection_test_address: >-
+  {{
+    (mgmt_reverse_proxy_enable | default(false) | bool)
+    | ternary((ansible_default_ipv4.address | default(ansible_host | default('127.0.0.1'))), '127.0.0.1')
+  }}
+
+# Reverse proxy for mgmt services (TLS termination on the mgmt VPN gateway IP).
+# Intended to be reachable only after connecting to the mgmt VPN:
+# - nginx binds to `mgmt_reverse_proxy_bind_ip` (usually `vpn_dns_client_ip`)
+# - UFW allowlists web ports to the mgmt VPN client subnet
+#
+# Domains:
+# - If you set `grafana_domain` / `prometheus_domain` / `pihole_domain` (per-host, e.g. in host_vars),
+#   those FQDNs are used.
+# - Otherwise defaults to `grafana.<mgmt_reverse_proxy_base_domain>` etc.
+# Best practice: point these names to the mgmt VPN gateway IP in your internal DNS (Pi-hole), not in public DNS.
+mgmt_reverse_proxy_enable: false
+mgmt_reverse_proxy_base_domain: "{{ vpn_domain }}"
+mgmt_reverse_proxy_bind_ip: "{{ vpn_dns_client_ip }}"
+mgmt_reverse_proxy_tls_mode: "{{ tuxedovpn_tls_mode | default('selfsigned') }}"
+
+ssh_port: 22
+ufw_extra_rules:
+  - { port: 443 }
+  # Allow web consoles/observability only from VPN clients
+  - { port: 80,   proto: tcp, src: "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}", direction: in }
+  - { port: 443,  proto: tcp, src: "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}", direction: in }
+  - { port: 8443, proto: tcp, src: "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}", direction: in }
+  - { port: 3000, proto: tcp, src: "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}", direction: in }  # Grafana
+  - { port: 9090, proto: tcp, src: "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}", direction: in }  # Prometheus
+
+# Allow DNS from mgmt VPN clients on any interface; DNS from remote VPN client subnets only via wg-mgmt
+# (the restriction is enforced by Pi-hole UFW rules).
+pihole_dns_allowed_sources:
+  - "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}"
+  - "127.0.0.1/32"
+pihole_dns_wireguard_only_sources: >-
+  {{
+    groups['vpn'] | default([])
+    | map('extract', hostvars, 'vpn_nat_subnets')
+    | select('defined')
+    | list
+    | flatten
+  }}
+# ufw_extra_rules:
+#   - { port: 9090 }   # Prometheus
+#   - { port: 3000 }
+
+freeradius_default_simultaneous_use: 2
+freeradius_enable_simultaneous_use: true
+freeradius_enable_daily_quota: false
+freeradius_enable_blocklist: true
+freeradius_acct_interim_interval: 60
+freeradius_accounting_exporter_enable: true
+freeradius_accounting_exporter_listen_ip: "127.0.0.1"
+freeradius_accounting_exporter_listen_port: 9814
+
+# FreeRADIUS should accept requests from VPN nodes only via WireGuard.
+freeradius_listen_auth_ip: "{{ mgmt_wireguard_mgmt_ip }}"
+freeradius_listen_acct_ip: "{{ mgmt_wireguard_mgmt_ip }}"
+
+# Additionally keep listeners on localhost for ocserv on mgmt itself (auth will keep working even if WireGuard is down).
+freeradius_listen_auth_ips:
+  - "127.0.0.1"
+  - "{{ mgmt_wireguard_mgmt_ip }}"
+freeradius_listen_acct_ips:
+  - "127.0.0.1"
+  - "{{ mgmt_wireguard_mgmt_ip }}"
+
+# Radtest on mgmt should target localhost.
+freeradius_radtest_server: "127.0.0.1"
+freeradius_radtest_nas_ip: "127.0.0.1"
+
+# Restrict mgmt/private VPN (NAS=localhost) to admin accounts only.
+freeradius_admin_only_nas_enforce: true
+freeradius_admin_only_nas_shortnames: ["localhost"]
+
+# RADIUS user groups (radusergroup).
+# - support: admin access (mgmt/private VPN)
+# - user1: default access (public VPN only)
+freeradius_user_group_assignments:
+  - { username: "{{ vpn_default_user_name }}", groupname: "admins", priority: 0 }
+  - { username: "user1", groupname: "default", priority: 0 }
+
+# Ensure extra VPN users exist in the RADIUS DB (radcheck).
+freeradius_extra_users:
+  - username: "user1"
+    password: "{{ vault_vpn_user1_password | default('') }}"
+
+# Sync RADIUS (radusergroup/radacct) to Pi-hole group assignments (gravity.db).
+radius_pihole_sync_enable: true
+radius_pihole_sync_metrics_listen_ip: "127.0.0.1"
+radius_pihole_sync_metrics_listen_port: 9817

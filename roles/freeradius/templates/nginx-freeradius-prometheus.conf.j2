@@ -1,0 +1,43 @@
+# Managed by Ansible (role: freeradius)
+#
+# TLS/mTLS wrapper for the FreeRADIUS rlm_prometheus HTTP listener.
+# - rlm_prometheus listens on {{ freeradius_prometheus_listen_ip }}:{{ freeradius_prometheus_listen_port }}
+# - nginx terminates TLS on {{ freeradius_prometheus_proxy_listen_ip_effective }}:{{ freeradius_prometheus_proxy_listen_port }}
+#
+server {
+    {% if freeradius_prometheus_proxy_tls_enable | bool %}
+    listen {{ freeradius_prometheus_proxy_listen_ip_effective }}:{{ freeradius_prometheus_proxy_listen_port }} ssl;
+    {% else %}
+    listen {{ freeradius_prometheus_proxy_listen_ip_effective }}:{{ freeradius_prometheus_proxy_listen_port }};
+    {% endif %}
+    server_name {{ freeradius_prometheus_proxy_server_name }};
+
+    {% if freeradius_prometheus_proxy_tls_enable | bool %}
+    ssl_certificate     {{ freeradius_prometheus_proxy_tls_cert_file }};
+    ssl_certificate_key {{ freeradius_prometheus_proxy_tls_key_file }};
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    {% if freeradius_prometheus_proxy_mtls_enable | bool %}
+    ssl_client_certificate {{ freeradius_prometheus_proxy_mtls_ca_file }};
+    ssl_verify_client on;
+    {% else %}
+    ssl_verify_client off;
+    {% endif %}
+    {% endif %}
+
+    {% if (freeradius_prometheus_proxy_allowed_sources | default([])) | length > 0 %}
+    {% for src in (freeradius_prometheus_proxy_allowed_sources | default([])) %}
+    allow {{ src }};
+    {% endfor %}
+    deny all;
+    {% endif %}
+
+    location / {
+        proxy_pass http://{{ freeradius_prometheus_listen_ip }}:{{ freeradius_prometheus_listen_port }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}

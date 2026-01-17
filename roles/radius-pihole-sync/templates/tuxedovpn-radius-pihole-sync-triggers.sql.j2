@@ -1,0 +1,47 @@
+-- Managed by Ansible (role: radius-pihole-sync)
+-- Sends NOTIFY events to drive event-driven Pi-hole group sync.
+
+CREATE OR REPLACE FUNCTION tuxedovpn_radius_pihole_sync_notify() RETURNS trigger AS $$
+DECLARE
+  payload jsonb;
+  channel text;
+BEGIN
+  channel := TG_ARGV[0];
+  payload := jsonb_build_object(
+    'table', TG_TABLE_NAME,
+    'op', TG_OP,
+    'ts', now()
+  );
+
+  IF TG_OP = 'INSERT' THEN
+    payload := payload || jsonb_build_object('new', to_jsonb(NEW));
+  ELSIF TG_OP = 'UPDATE' THEN
+    payload := payload || jsonb_build_object('old', to_jsonb(OLD), 'new', to_jsonb(NEW));
+  ELSIF TG_OP = 'DELETE' THEN
+    payload := payload || jsonb_build_object('old', to_jsonb(OLD));
+  END IF;
+
+  PERFORM pg_notify(channel, payload::text);
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS tuxedovpn_radius_pihole_sync_radacct_insert ON radacct;
+CREATE TRIGGER tuxedovpn_radius_pihole_sync_radacct_insert
+AFTER INSERT ON radacct
+FOR EACH ROW
+WHEN (NEW.acctstoptime IS NULL AND NEW.username IS NOT NULL AND NEW.framedipaddress IS NOT NULL)
+EXECUTE FUNCTION tuxedovpn_radius_pihole_sync_notify('{{ radius_pihole_sync_pg_listen_channel }}');
+
+DROP TRIGGER IF EXISTS tuxedovpn_radius_pihole_sync_radacct_update ON radacct;
+CREATE TRIGGER tuxedovpn_radius_pihole_sync_radacct_update
+AFTER UPDATE OF acctstoptime, framedipaddress ON radacct
+FOR EACH ROW
+WHEN (OLD.acctstoptime IS DISTINCT FROM NEW.acctstoptime OR OLD.framedipaddress IS DISTINCT FROM NEW.framedipaddress)
+EXECUTE FUNCTION tuxedovpn_radius_pihole_sync_notify('{{ radius_pihole_sync_pg_listen_channel }}');
+
+DROP TRIGGER IF EXISTS tuxedovpn_radius_pihole_sync_radusergroup_change ON radusergroup;
+CREATE TRIGGER tuxedovpn_radius_pihole_sync_radusergroup_change
+AFTER INSERT OR UPDATE OR DELETE ON radusergroup
+FOR EACH ROW
+EXECUTE FUNCTION tuxedovpn_radius_pihole_sync_notify('{{ radius_pihole_sync_pg_listen_channel }}');

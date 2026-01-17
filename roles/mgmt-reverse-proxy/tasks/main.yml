@@ -1,0 +1,277 @@
+---
+- name: Disable mgmt reverse proxy (remove nginx config)
+  when: not (mgmt_reverse_proxy_enable | default(false) | bool)
+  block:
+    - name: Remove nginx site (when present)
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/tuxedovpn-mgmt-proxy.conf
+        state: absent
+      notify: Reload nginx
+
+    - name: Flush nginx reload (best-effort)
+      ansible.builtin.meta: flush_handlers
+  rescue:
+    - name: Ignore cleanup errors when nginx is not installed
+      ansible.builtin.debug:
+        msg: "mgmt-reverse-proxy cleanup skipped (nginx likely not installed)."
+
+- name: Configure mgmt reverse proxy (nginx TLS termination)
+  when: mgmt_reverse_proxy_enable | default(false) | bool
+  block:
+    - name: Validate reverse proxy base domain
+      ansible.builtin.assert:
+        that:
+          - (mgmt_reverse_proxy_base_domain | default('') | trim | length) > 0
+        fail_msg: "mgmt_reverse_proxy_base_domain is empty."
+
+    - name: Validate reverse proxy bind IP
+      ansible.builtin.assert:
+        that:
+          - (mgmt_reverse_proxy_bind_ip | default('') | trim | length) > 0
+          - (mgmt_reverse_proxy_bind_ip | trim) != "0.0.0.0"
+        fail_msg: >-
+          mgmt_reverse_proxy_bind_ip must be a specific local IP (not 0.0.0.0) to avoid port conflicts with ocserv.
+          Recommended: vpn_dns_client_ip (mgmt VPN gateway IP).
+
+    - name: Validate reverse proxy TLS mode
+      ansible.builtin.assert:
+        that:
+          - mgmt_reverse_proxy_tls_mode in ["selfsigned", "certbot"]
+        fail_msg: "mgmt_reverse_proxy_tls_mode must be 'selfsigned' or 'certbot'."
+
+    - name: Compute public ocserv bind IP
+      ansible.builtin.set_fact:
+        _mgmt_reverse_proxy_ocserv_public_ip: >-
+          {{
+            (
+              (vpn_listen_host | default('', true) | trim)
+              if (vpn_listen_host | default('', true) | trim | length) > 0
+              else (ansible_host | default(ansible_default_ipv4.address | default('')))
+            )
+          }}
+
+    - name: Validate ocserv bind address (must not be 0.0.0.0 when using reverse proxy)
+      ansible.builtin.assert:
+        that:
+          - (_mgmt_reverse_proxy_ocserv_public_ip | default('') | trim) is match('^\\d+\\.\\d+\\.\\d+\\.\\d+$')
+          - (_mgmt_reverse_proxy_ocserv_public_ip | trim) != "0.0.0.0"
+        fail_msg: >-
+          vpn_listen_host (or ansible_host) must be a specific public IPv4 (not 0.0.0.0) when mgmt_reverse_proxy_enable=true,
+          otherwise ocserv will occupy 0.0.0.0:443 and nginx cannot bind to {{ mgmt_reverse_proxy_bind_ip }}:{{ mgmt_reverse_proxy_https_port }}.
+
+    - name: Ensure nginx is installed
+      ansible.builtin.package:
+        name: nginx
+        state: present
+
+    - name: Disable nginx default site (avoid port 80 conflicts)
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Prepare TLS certificates (self-signed)
+      ansible.builtin.include_tasks: tls_selfsigned.yml
+      when: mgmt_reverse_proxy_tls_mode == "selfsigned"
+
+    - name: Prepare TLS certificates (certbot/Let's Encrypt)
+      ansible.builtin.include_tasks: tls_certbot.yml
+      when: mgmt_reverse_proxy_tls_mode == "certbot"
+
+    - name: Deploy nginx site for mgmt reverse proxy
+      ansible.builtin.template:
+        src: tuxedovpn-mgmt-proxy.conf.j2
+        dest: /etc/nginx/conf.d/tuxedovpn-mgmt-proxy.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload nginx
+
+    - name: Ensure nginx starts after ocserv (so bind IP exists)
+      ansible.builtin.file:
+        path: /etc/systemd/system/nginx.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install nginx systemd drop-in (After=ocserv)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/nginx.service.d/10-after-ocserv.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          After=ocserv.service
+          Wants=ocserv.service
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Collect service facts (ocserv dependency)
+      ansible.builtin.service_facts:
+
+    - name: Ensure ocserv is running (to provide the VPN gateway bind IP)
+      ansible.builtin.service:
+        name: ocserv
+        state: started
+      when:
+        - ansible_facts.services['ocserv.service'] is defined or ansible_facts.services['ocserv'] is defined
+
+    - name: Ensure ocserv listens only on the public IP (so nginx can use the VPN IP)
+      when: ansible_facts.services['ocserv.service'] is defined or ansible_facts.services['ocserv'] is defined
+      block:
+        - name: Remove any existing listen-host directives (dedupe)
+          ansible.builtin.replace:
+            path: /etc/ocserv/ocserv.conf
+            regexp: '(?m)^\\s*listen-host\\s*=.*$\\n?'
+            replace: ''
+
+        - name: Ensure ocserv listen-host is set to the public IP
+          ansible.builtin.lineinfile:
+            path: /etc/ocserv/ocserv.conf
+            regexp: '^\\s*listen-host\\s*='
+            line: "listen-host = {{ _mgmt_reverse_proxy_ocserv_public_ip }}"
+            insertbefore: '^\\s*tcp-port\\s*='
+          register: _mgmt_reverse_proxy_ocserv_listen_host
+
+        - name: Restart ocserv if listen-host was adjusted
+          ansible.builtin.service:
+            name: ocserv
+            state: restarted
+          when: _mgmt_reverse_proxy_ocserv_listen_host.changed
+
+        - name: Verify ocserv is not bound to wildcard :443
+          ansible.builtin.shell: |
+            set -euo pipefail
+            port={{ vpn_listen_port | default(443) }}
+            out="$(ss -H -lntp \"sport = :${port}\" 2>/dev/null || true)"
+            # If ocserv isn't running yet, don't fail here; service task above will handle it.
+            if ! echo "${out}" | grep -q 'ocserv-main'; then
+              exit 0
+            fi
+            # ocserv must not occupy wildcard binds (0.0.0.0/*/[::]) otherwise nginx cannot bind a specific IP:port.
+            if echo "${out}" | grep -qE '(^|\\s)(0\\.0\\.0\\.0|\\*|\\[::\\]|::):'"${port}"'\\s+.*ocserv-main'; then
+              echo "${out}"
+              exit 1
+            fi
+            # It should normally bind exactly to vpn_listen_host.
+            if ! echo "${out}" | grep -qE '(^|\\s){{ _mgmt_reverse_proxy_ocserv_public_ip | regex_escape }}:'"${port}"'\\s+.*ocserv-main'; then
+              echo "${out}"
+              exit 1
+            fi
+          args:
+            executable: /bin/bash
+          register: _mgmt_reverse_proxy_ocserv_bind_check
+          changed_when: false
+          retries: 10
+          delay: 1
+          until: _mgmt_reverse_proxy_ocserv_bind_check.rc == 0
+
+    - name: Check bind IP presence (best-effort)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ip -o -4 addr show | awk '{print $4}' | cut -d/ -f1 | grep -qx {{ mgmt_reverse_proxy_bind_ip | quote }}
+      args:
+        executable: /bin/bash
+      register: _mgmt_reverse_proxy_bind_ip_check
+      changed_when: false
+      failed_when: false
+
+    # ocserv creates per-user tun devices, so the VPN gateway IP may not exist
+    # until at least one client is connected. Allow nginx to bind anyway.
+    - name: Allow binding to non-local IPs (net.ipv4.ip_nonlocal_bind)
+      ansible.builtin.sysctl:
+        name: net.ipv4.ip_nonlocal_bind
+        value: "1"
+        sysctl_set: true
+        state: present
+        reload: true
+        sysctl_file: /etc/sysctl.d/99-tuxedovpn-mgmt-reverse-proxy.conf
+      when: _mgmt_reverse_proxy_bind_ip_check.rc != 0
+
+    - name: Check if reverse proxy port is already in use (conflicting bind)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        port={{ mgmt_reverse_proxy_https_port | int }}
+        bind_ip={{ mgmt_reverse_proxy_bind_ip | quote }}
+        # Conflicts are:
+        # - wildcard listeners on the same port (0.0.0.0/*/[::]/::)
+        # - listeners on the exact IP:port we need
+        ss -H -lntp "sport = :${port}" 2>/dev/null \
+          | awk -v ip="${bind_ip}" -v port="${port}" '
+              $4 == "0.0.0.0:"port || $4 == "*:"port || $4 == "[::]:"port || $4 == ip":"port {print}
+            '
+      args:
+        executable: /bin/bash
+      register: _mgmt_reverse_proxy_port_in_use
+      changed_when: false
+      failed_when: false
+
+    - name: Filter reverse proxy port conflicts (ignore nginx)
+      ansible.builtin.set_fact:
+        _mgmt_reverse_proxy_port_in_use_non_nginx: >-
+          {{
+            (_mgmt_reverse_proxy_port_in_use.stdout_lines | default([]))
+            | reject('search', '"nginx"')
+            | list
+          }}
+      changed_when: false
+
+    - name: Fail when reverse proxy port is occupied by another service
+      ansible.builtin.fail:
+        msg: >-
+          Port {{ mgmt_reverse_proxy_bind_ip }}:{{ mgmt_reverse_proxy_https_port }} is already in use, so nginx cannot bind.
+          Listener(s):
+          {{ (_mgmt_reverse_proxy_port_in_use_non_nginx | default([])) | join('\n') }}
+      when: (_mgmt_reverse_proxy_port_in_use_non_nginx | default([]) | length) > 0
+
+    - name: Validate nginx configuration
+      ansible.builtin.command: nginx -t
+      register: _mgmt_reverse_proxy_nginx_test
+      changed_when: false
+
+    - name: Ensure nginx is enabled and running
+      block:
+        - name: Start and enable nginx
+          ansible.builtin.service:
+            name: nginx
+            state: started
+            enabled: true
+      rescue:
+        - name: Collect listeners for debugging
+          ansible.builtin.shell: |
+            set -euo pipefail
+            ss -lntup | egrep ':(80|443) ' || true
+          args:
+            executable: /bin/bash
+          register: _mgmt_reverse_proxy_ss_debug
+          changed_when: false
+
+        - name: Collect nginx status for debugging
+          ansible.builtin.command: systemctl --no-pager --full status nginx
+          register: _mgmt_reverse_proxy_nginx_status
+          changed_when: false
+          failed_when: false
+
+        - name: Collect nginx journal for debugging
+          ansible.builtin.command: journalctl --no-pager -u nginx -n 80
+          register: _mgmt_reverse_proxy_nginx_journal
+          changed_when: false
+          failed_when: false
+
+        - name: Fail with nginx diagnostics
+          ansible.builtin.fail:
+            msg: |-
+              nginx failed to start.
+
+              Listeners:
+              {{ _mgmt_reverse_proxy_ss_debug.stdout | default('') }}
+
+              nginx status:
+              {{ _mgmt_reverse_proxy_nginx_status.stdout | default('') }}
+
+              nginx journal:
+              {{ _mgmt_reverse_proxy_nginx_journal.stdout | default('') }}

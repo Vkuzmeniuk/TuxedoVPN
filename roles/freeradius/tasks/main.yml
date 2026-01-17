@@ -1,0 +1,1659 @@
+- name: Ensure FreeRADIUS upstream repository is available
+  ansible.builtin.apt_repository:
+    repo: "{{ freeradius_apt_repo }}"
+    state: present
+  when:
+    - ansible_pkg_mgr == 'apt'
+    - freeradius_manage_repo | bool
+  register: freeradius_repo_result
+  tags: ['freeradius', 'packages']
+
+- name: Refresh apt cache after enabling FreeRADIUS repository
+  ansible.builtin.apt:
+    update_cache: true
+  when:
+    - ansible_pkg_mgr == 'apt'
+    - freeradius_manage_repo | bool
+    - freeradius_repo_result is defined
+    - freeradius_repo_result.changed
+  tags: ['freeradius', 'packages']
+
+- name: Install FreeRADIUS and PostgreSQL dependencies (APT)
+  ansible.builtin.apt:
+    name:
+      - freeradius
+      - freeradius-postgresql
+      - freeradius-utils
+      - postgresql
+      - postgresql-contrib
+      - python3-psycopg2
+      - ssl-cert
+    state: present
+    update_cache: true
+    lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
+  when: ansible_pkg_mgr == 'apt'
+  tags: ['freeradius', 'postgresql', 'packages']
+
+- name: Install FreeRADIUS and PostgreSQL dependencies (generic)
+  ansible.builtin.package:
+    name:
+      - freeradius
+      - freeradius-postgresql
+      - freeradius-utils
+      - postgresql
+      - postgresql-contrib
+      - python3-psycopg2
+      - ssl-cert
+    state: present
+  when: ansible_pkg_mgr != 'apt'
+  tags: ['freeradius', 'postgresql', 'packages']
+
+- name: Ensure PostgreSQL service is enabled and started
+  ansible.builtin.service:
+    name: "{{ freeradius_pg_service_name }}"
+    state: started
+    enabled: true
+  tags: ['freeradius', 'postgresql', 'service']
+
+- name: Ensure FreeRADIUS service is enabled
+  ansible.builtin.service:
+    name: "{{ freeradius_radius_service_name }}"
+    state: started
+    enabled: true
+  tags: ['freeradius', 'service']
+
+- name: Apply legacy variable compatibility
+  ansible.builtin.set_fact:
+    freeradius_manage_vpn_user: "{{ freeradius_manage_private_vpn_user | bool }}"
+  when: freeradius_manage_private_vpn_user is defined
+
+- name: Apply legacy validation flag compatibility
+  ansible.builtin.set_fact:
+    freeradius_validate_vpn_user: "{{ freeradius_validate_private_vpn_user | bool }}"
+  when: freeradius_validate_private_vpn_user is defined
+
+- name: Discover PostgreSQL config file
+  ansible.builtin.command: psql -tAc "show config_file;"
+  become_user: postgres
+  register: freeradius_pg_config_file_query
+  changed_when: false
+
+- name: Discover PostgreSQL HBA file
+  ansible.builtin.command: psql -tAc "show hba_file;"
+  become_user: postgres
+  register: freeradius_pg_hba_file_query
+  changed_when: false
+
+- name: Register PostgreSQL config paths
+  ansible.builtin.set_fact:
+    freeradius_pg_config_file: "{{ freeradius_pg_config_file_query.stdout | trim }}"
+    freeradius_pg_hba_file: "{{ freeradius_pg_hba_file_query.stdout | trim }}"
+
+- name: Build VPN host CIDR list
+  ansible.builtin.set_fact:
+    freeradius_vpn_host_cidrs: "{{ freeradius_vpn_host_cidrs | default([]) + [ (hostvars[item].ansible_host | default(item)) ~ '/32' ] }}"
+  loop: "{{ groups['vpn'] | default([]) }}"
+
+- name: Collect NAT subnets for access control
+  ansible.builtin.set_fact:
+    freeradius_vpn_nat_cidrs: "{{ (freeradius_vpn_nat_cidrs | default([])) + (hostvars[item].vpn_nat_subnets | default([])) }}"
+  loop: "{{ groups['vpn'] | default([]) }}"
+
+- name: Include local NAT subnets
+  ansible.builtin.set_fact:
+    freeradius_vpn_nat_cidrs: "{{ (freeradius_vpn_nat_cidrs | default([])) + (vpn_nat_subnets | default([])) }}"
+
+- name: Compose effective CIDR allow-list
+  ansible.builtin.set_fact:
+    freeradius_effective_cidrs: >-
+      {{
+        (
+          (freeradius_allowed_db_cidrs | default([])) +
+          (freeradius_vpn_nat_cidrs | default([])) +
+          (freeradius_vpn_host_cidrs | default([]))
+        ) | unique
+      }}
+
+- name: Ensure PostgreSQL listens on all addresses
+  ansible.builtin.lineinfile:
+    path: "{{ freeradius_pg_config_file }}"
+    regexp: '^#?\s*listen_addresses\s*='
+    line: "listen_addresses = '*'"
+  notify: Restart PostgreSQL
+
+- name: Ensure PostgreSQL SSL is enabled
+  ansible.builtin.lineinfile:
+    path: "{{ freeradius_pg_config_file }}"
+    regexp: '^#?\s*ssl\s*='
+    line: "ssl = on"
+  notify: Restart PostgreSQL
+
+- name: Ensure PostgreSQL SSL certificate path
+  ansible.builtin.lineinfile:
+    path: "{{ freeradius_pg_config_file }}"
+    regexp: '^#?\s*ssl_cert_file\s*='
+    line: "ssl_cert_file = '/etc/ssl/certs/ssl-cert-snakeoil.pem'"
+  notify: Restart PostgreSQL
+
+- name: Ensure PostgreSQL SSL key path
+  ansible.builtin.lineinfile:
+    path: "{{ freeradius_pg_config_file }}"
+    regexp: '^#?\s*ssl_key_file\s*='
+    line: "ssl_key_file = '/etc/ssl/private/ssl-cert-snakeoil.key'"
+  notify: Restart PostgreSQL
+
+- name: Allow local FreeRADIUS DB access
+  ansible.builtin.blockinfile:
+    path: "{{ freeradius_pg_hba_file }}"
+    marker: "# {mark} FREERADIUS LOCAL ACCESS"
+    block: |
+      local   {{ freeradius_db_name }}   {{ freeradius_db_user }}                      peer
+  notify: Restart PostgreSQL
+
+- name: Allow remote VPN DB access over TLS
+  ansible.builtin.blockinfile:
+    path: "{{ freeradius_pg_hba_file }}"
+    marker: "# {mark} FREERADIUS REMOTE ACCESS"
+    block: |
+      {% for cidr in freeradius_effective_cidrs %}
+      hostssl {{ freeradius_db_name }}   {{ freeradius_db_user }}   {{ cidr }}   scram-sha-256
+      {% endfor %}
+  notify: Restart PostgreSQL
+
+- name: Ensure PostgreSQL role for FreeRADIUS exists
+  ansible.builtin.shell: |
+    set -o pipefail
+    psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='{{ freeradius_db_user }}'" | grep -q 1 || \
+    psql -c "CREATE ROLE \"{{ freeradius_db_user }}\" WITH LOGIN PASSWORD '{{ freeradius_db_password }}';"
+  become_user: postgres
+  args:
+    executable: /bin/bash
+  register: freeradius_create_role
+  changed_when: "'CREATE ROLE' in (freeradius_create_role.stdout | default(''))"
+  no_log: true
+
+- name: Ensure PostgreSQL role password is set
+  ansible.builtin.command: >
+    psql -c "ALTER ROLE \"{{ freeradius_db_user }}\" WITH PASSWORD '{{ freeradius_db_password }}';"
+  become_user: postgres
+  register: freeradius_alter_role
+  changed_when: "'ALTER ROLE' in (freeradius_alter_role.stdout | default(''))"
+  no_log: true
+
+- name: Ensure FreeRADIUS database exists
+  ansible.builtin.shell: |
+    set -o pipefail
+    psql -tAc "SELECT 1 FROM pg_database WHERE datname='{{ freeradius_db_name }}'" | grep -q 1 || \
+    psql -c "CREATE DATABASE \"{{ freeradius_db_name }}\" WITH OWNER \"{{ freeradius_db_user }}\" ENCODING 'UTF8';"
+  become_user: postgres
+  args:
+    executable: /bin/bash
+  register: freeradius_create_db
+  changed_when: "'CREATE DATABASE' in (freeradius_create_db.stdout | default(''))"
+
+- name: Ensure privileges on FreeRADIUS database
+  ansible.builtin.command: >
+    psql -c "GRANT ALL PRIVILEGES ON DATABASE \"{{ freeradius_db_name }}\" TO \"{{ freeradius_db_user }}\";"
+  become_user: postgres
+  register: freeradius_grant_privs
+  changed_when: "'GRANT' in (freeradius_grant_privs.stdout | default(''))"
+
+- name: Copy FreeRADIUS schema to temp location
+  ansible.builtin.copy:
+    src: "{{ freeradius_conf_dir }}/mods-config/sql/main/postgresql/schema.sql"
+    dest: /tmp/freeradius_schema.sql
+    remote_src: true
+    owner: postgres
+    group: postgres
+    mode: '0644'
+
+- name: Initialize FreeRADIUS schema (idempotent)
+  ansible.builtin.command: >
+    bash -lc "psql -d {{ freeradius_db_name }} -f /tmp/freeradius_schema.sql && touch {{ freeradius_schema_sentinel }}"
+  args:
+    creates: "{{ freeradius_schema_sentinel }}"
+  become_user: postgres
+
+- name: Ensure FreeRADIUS user has schema usage
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "GRANT USAGE ON SCHEMA public TO \"{{ freeradius_db_user }}\";"
+  become_user: postgres
+  changed_when: false
+
+- name: Ensure FreeRADIUS user has table privileges
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO \"{{ freeradius_db_user }}\";"
+  become_user: postgres
+  changed_when: false
+
+- name: Ensure FreeRADIUS user has sequence privileges
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO \"{{ freeradius_db_user }}\";"
+  become_user: postgres
+  changed_when: false
+
+- name: Ensure default privileges favor FreeRADIUS user
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO \"{{ freeradius_db_user }}\"; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO \"{{ freeradius_db_user }}\";"
+  become_user: postgres
+  changed_when: false
+
+- name: Detect radacct gigawords support
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -tAc "
+    SELECT COUNT(*) FROM information_schema.columns
+    WHERE table_name = 'radacct'
+      AND column_name IN ('acctinputgigawords','acctoutputgigawords');
+    "
+  become_user: postgres
+  register: freeradius_radacct_gigawords_check
+  changed_when: false
+  failed_when: false
+
+- name: Set radacct octet expressions
+  ansible.builtin.set_fact:
+    freeradius_radacct_has_gigawords: "{{ (freeradius_radacct_gigawords_check.stdout | default('0') | trim | int) == 2 }}"
+    freeradius_radacct_input_octets_expr: "{{ '(acctinputoctets::bigint + COALESCE(acctinputgigawords, 0)::bigint * 4294967296)' if (freeradius_radacct_gigawords_check.stdout | default('0') | trim | int) == 2 else 'acctinputoctets::bigint' }}"
+    freeradius_radacct_output_octets_expr: "{{ '(acctoutputoctets::bigint + COALESCE(acctoutputgigawords, 0)::bigint * 4294967296)' if (freeradius_radacct_gigawords_check.stdout | default('0') | trim | int) == 2 else 'acctoutputoctets::bigint' }}"
+
+- name: Ensure VPN blocklist table exists
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+    CREATE TABLE IF NOT EXISTS vpn_user_blocklist (
+      username TEXT PRIMARY KEY,
+      reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ
+    );
+    "
+  become_user: postgres
+  changed_when: false
+
+- name: Ensure VPN blocklist expiration index exists
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+    CREATE INDEX IF NOT EXISTS idx_vpn_user_blocklist_expires
+      ON vpn_user_blocklist (expires_at);
+    "
+  become_user: postgres
+  changed_when: false
+
+- name: Ensure radacct daily usage view exists
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+    CREATE OR REPLACE VIEW radacct_daily_usage AS
+      SELECT
+        username,
+        date_trunc('day', COALESCE(acctstarttime, acctstoptime, NOW())) AS usage_day,
+        SUM({{ freeradius_radacct_input_octets_expr }}) AS input_octets,
+        SUM({{ freeradius_radacct_output_octets_expr }}) AS output_octets,
+        SUM(acctsessiontime) AS session_seconds
+      FROM radacct
+      GROUP BY username, usage_day;
+    "
+  become_user: postgres
+  changed_when: false
+
+- name: Ensure radacct active sessions view exists
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+    CREATE OR REPLACE VIEW radacct_active_sessions AS
+      SELECT
+        radacctid,
+        username,
+        nasipaddress,
+        framedipaddress,
+        acctstarttime,
+        calledstationid,
+        callingstationid,
+        {{ freeradius_radacct_input_octets_expr }} AS input_octets,
+        {{ freeradius_radacct_output_octets_expr }} AS output_octets
+      FROM radacct
+      WHERE acctstoptime IS NULL;
+    "
+  become_user: postgres
+  changed_when: false
+
+- name: Ensure radacct user last session view exists
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+    CREATE OR REPLACE VIEW radacct_user_last_session AS
+      SELECT DISTINCT ON (username)
+        username,
+        framedipaddress,
+        callingstationid,
+        connectinfo_start,
+        COALESCE(acctstoptime, acctstarttime, NOW()) AS last_seen_at
+      FROM radacct
+      WHERE username IS NOT NULL AND username <> ''
+      ORDER BY username, COALESCE(acctstoptime, acctstarttime, NOW()) DESC, radacctid DESC;
+    "
+  become_user: postgres
+  changed_when: false
+  failed_when: false
+
+- name: Ensure radacct session usage view exists
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+    CREATE OR REPLACE VIEW radacct_session_usage AS
+      SELECT
+        radacctid,
+        username,
+        nasipaddress,
+        framedipaddress,
+        acctsessionid,
+        acctuniqueid,
+        acctstarttime,
+        acctstoptime,
+        calledstationid,
+        callingstationid,
+        acctterminatecause,
+        {{ freeradius_radacct_input_octets_expr }} AS input_octets,
+        {{ freeradius_radacct_output_octets_expr }} AS output_octets,
+        ({{ freeradius_radacct_input_octets_expr }} + {{ freeradius_radacct_output_octets_expr }}) AS total_octets,
+        COALESCE(acctsessiontime,
+                 GREATEST(
+                   0,
+                   EXTRACT(EPOCH FROM (COALESCE(acctstoptime, NOW()) - COALESCE(acctstarttime, NOW())))
+                 )::bigint) AS session_seconds
+      FROM radacct;
+    "
+  become_user: postgres
+  changed_when: false
+
+- name: Ensure radacct active session counts view exists
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+    CREATE OR REPLACE VIEW radacct_active_session_counts AS
+      SELECT
+        username,
+        COUNT(*) AS active_sessions,
+        SUM({{ freeradius_radacct_input_octets_expr }}) AS input_octets,
+        SUM({{ freeradius_radacct_output_octets_expr }}) AS output_octets,
+        SUM({{ freeradius_radacct_input_octets_expr }} + {{ freeradius_radacct_output_octets_expr }}) AS total_octets,
+        MIN(acctstarttime) AS first_session_start,
+        MAX(acctstarttime) AS latest_session_start
+      FROM radacct
+      WHERE acctstoptime IS NULL
+      GROUP BY username;
+    "
+  become_user: postgres
+  changed_when: false
+
+- name: Ensure radacct active session counts-by-NAS view exists
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+    CREATE OR REPLACE VIEW radacct_active_session_counts_by_nas AS
+      SELECT
+        username,
+        nasipaddress,
+        COUNT(*) AS active_sessions,
+        SUM({{ freeradius_radacct_input_octets_expr }}) AS input_octets,
+        SUM({{ freeradius_radacct_output_octets_expr }}) AS output_octets,
+        SUM({{ freeradius_radacct_input_octets_expr }} + {{ freeradius_radacct_output_octets_expr }}) AS total_octets,
+        MIN(acctstarttime) AS first_session_start,
+        MAX(acctstarttime) AS latest_session_start
+      FROM radacct
+      WHERE acctstoptime IS NULL
+      GROUP BY username, nasipaddress;
+    "
+  become_user: postgres
+  changed_when: false
+  failed_when: false
+
+- name: Ensure radacct session usage-by-NAS view exists
+  ansible.builtin.command: >
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+    CREATE OR REPLACE VIEW radacct_session_usage_by_nas AS
+      SELECT
+        username,
+        nasipaddress,
+        COALESCE(SUM(input_octets), 0)::bigint  AS input_octets,
+        COALESCE(SUM(output_octets), 0)::bigint AS output_octets,
+        COALESCE(SUM(total_octets), 0)::bigint  AS total_octets
+      FROM radacct_session_usage
+      WHERE username IS NOT NULL AND username <> ''
+      GROUP BY username, nasipaddress;
+    "
+  become_user: postgres
+  changed_when: false
+  failed_when: false
+
+- name: Capture default VPN user credentials for RADIUS
+  ansible.builtin.set_fact:
+    freeradius_managed_vpn_username: "{{ vpn_default_user_name | default('support') }}"
+    freeradius_managed_vpn_password: >-
+      {{
+        vpn_default_user_password
+        | default(vault_vpn_default_user_password, true)
+      }}
+  when:
+    - freeradius_manage_vpn_user | default(true) | bool
+    - (vpn_auth_mode | default('local')) == 'radius'
+  no_log: true
+
+- name: Prepare SQL-safe default VPN user credentials
+  ansible.builtin.set_fact:
+    freeradius_managed_vpn_username_sql: "{{ (freeradius_managed_vpn_username | default('')) | replace(\"'\", \"''\") }}"
+    freeradius_managed_vpn_password_sql: "{{ (freeradius_managed_vpn_password | default('')) | replace(\"'\", \"''\") }}"
+  when:
+    - freeradius_manage_vpn_user | default(true) | bool
+    - (vpn_auth_mode | default('local')) == 'radius'
+  no_log: true
+
+- name: Ensure default VPN user password is available
+  ansible.builtin.assert:
+    that:
+      - (freeradius_managed_vpn_password | default('')) | length > 0
+    fail_msg: >-
+      Failed to determine the password for user {{ freeradius_managed_vpn_username | default('support') }}.
+      Set vpn_default_user_password or vault_vpn_default_user_password (in ansible-vault).
+  when:
+    - freeradius_manage_vpn_user | default(true) | bool
+    - (vpn_auth_mode | default('local')) == 'radius'
+  no_log: true
+
+- name: Render SQL for the default VPN user
+  ansible.builtin.template:
+    src: manage_vpn_user.sql.j2
+    dest: /tmp/freeradius_managed_vpn_user.sql
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  when:
+    - freeradius_manage_vpn_user | default(true) | bool
+    - (vpn_auth_mode | default('local')) == 'radius'
+  vars:
+    freeradius_managed_vpn_username: "{{ freeradius_managed_vpn_username }}"
+    freeradius_managed_vpn_password: "{{ freeradius_managed_vpn_password }}"
+  no_log: true
+
+- name: Apply SQL for the default VPN user
+  ansible.builtin.command:
+    cmd: >
+      psql -d {{ freeradius_db_name }} -tA -q -v ON_ERROR_STOP=1 -f /tmp/freeradius_managed_vpn_user.sql
+  become_user: postgres
+  register: freeradius_managed_vpn_user_sync
+  when:
+    - freeradius_manage_vpn_user | default(true) | bool
+    - (vpn_auth_mode | default('local')) == 'radius'
+  changed_when: freeradius_managed_vpn_user_sync.stdout is search('USER_SYNC=1')
+  no_log: true
+
+- name: Remove temporary SQL file for the VPN user
+  ansible.builtin.file:
+    path: /tmp/freeradius_managed_vpn_user.sql
+    state: absent
+  when:
+    - freeradius_manage_vpn_user | default(true) | bool
+    - (vpn_auth_mode | default('local')) == 'radius'
+
+- name: Ensure default VPN user exists in radcheck
+  when:
+    - freeradius_manage_vpn_user | default(true) | bool
+    - (vpn_auth_mode | default('local')) == 'radius'
+  block:
+    - name: Count default VPN user entries in radcheck
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -tAc
+          "SELECT COUNT(*)
+             FROM radcheck
+            WHERE username = '{{ freeradius_managed_vpn_username_sql }}'
+              AND attribute = 'Cleartext-Password'
+              AND op = ':='"
+      become_user: postgres
+      register: freeradius_managed_vpn_user_radcheck_count_before
+      changed_when: false
+
+    - name: Reseed default VPN user in radcheck when missing
+      ansible.builtin.shell: |
+        set -o pipefail
+        psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 <<'SQL'
+        DELETE FROM radcheck
+         WHERE username = '{{ freeradius_managed_vpn_username_sql }}'
+           AND attribute = 'Cleartext-Password'
+           AND op = ':=';
+        INSERT INTO radcheck (username, attribute, op, value)
+        VALUES ('{{ freeradius_managed_vpn_username_sql }}', 'Cleartext-Password', ':=', '{{ freeradius_managed_vpn_password_sql }}');
+        SQL
+      args:
+        executable: /bin/bash
+      become_user: postgres
+      register: freeradius_managed_vpn_user_radcheck_reseed
+      when: (freeradius_managed_vpn_user_radcheck_count_before.stdout | default('0') | trim | int) == 0
+      changed_when: freeradius_managed_vpn_user_radcheck_reseed.rc == 0
+      no_log: true
+
+    - name: Confirm default VPN user radcheck entry
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -tAc
+          "SELECT COUNT(*)
+             FROM radcheck
+            WHERE username = '{{ freeradius_managed_vpn_username_sql }}'
+              AND attribute = 'Cleartext-Password'
+              AND op = ':='"
+      become_user: postgres
+      register: freeradius_managed_vpn_user_radcheck_count
+      changed_when: false
+
+    - name: Fetch default VPN user radcheck value
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -tAc
+          "SELECT value
+             FROM radcheck
+            WHERE username = '{{ freeradius_managed_vpn_username_sql }}'
+              AND attribute = 'Cleartext-Password'
+              AND op = ':='
+            ORDER BY id
+            LIMIT 1"
+      become_user: postgres
+      register: freeradius_managed_vpn_user_radcheck_value
+      changed_when: false
+      when: (freeradius_managed_vpn_user_radcheck_count.stdout | default('0') | trim | int) > 0
+      no_log: true
+
+    - name: Ensure radcheck contains default VPN user
+      ansible.builtin.assert:
+        that:
+          - (freeradius_managed_vpn_user_radcheck_count.stdout | default('0') | trim | int) > 0
+        fail_msg: "Failed to synchronize user {{ freeradius_managed_vpn_username }} in the radcheck table."
+
+- name: Ensure radcheck password matches expected default VPN user password
+  ansible.builtin.assert:
+    that:
+      - (freeradius_managed_vpn_user_radcheck_value.stdout | default('') | trim) == (freeradius_managed_vpn_password | default('') | string)
+    fail_msg: "Password for user {{ freeradius_managed_vpn_username }} in radcheck does not match the expected value."
+  when: (freeradius_managed_vpn_user_radcheck_count.stdout | default('0') | trim | int) > 0
+  no_log: true
+
+- name: Validate extra RADIUS user definitions
+  ansible.builtin.assert:
+    that:
+      - item.username is defined
+      - (item.username | string) | length > 0
+      - item.password is defined
+      - (item.password | string) | length > 0
+  loop: "{{ freeradius_extra_users | default([]) }}"
+  when:
+    - (freeradius_extra_users | default([]) | length) > 0
+    - (vpn_auth_mode | default('local')) == 'radius'
+  loop_control:
+    label: "{{ item.username | default('') }}"
+  no_log: true
+
+- name: Ensure extra RADIUS users exist in radcheck
+  ansible.builtin.shell: |
+    set -o pipefail
+    psql -d {{ freeradius_db_name }} -tA -q -v ON_ERROR_STOP=1 <<'SQL'
+    WITH desired AS (
+        SELECT '{{ (item.username | string) | replace("'", "''") }}'::text AS username,
+               '{{ (item.password | string) | replace("'", "''") }}'::text AS password
+    ),
+    existing AS (
+        SELECT id, value
+          FROM radcheck
+         WHERE username = (SELECT username FROM desired)
+           AND attribute = 'Cleartext-Password'
+           AND op = ':='
+    ),
+    keeper AS (
+        SELECT id
+          FROM existing
+         ORDER BY id
+         LIMIT 1
+    ),
+    duplicates AS (
+        DELETE FROM radcheck
+         WHERE username = (SELECT username FROM desired)
+           AND attribute = 'Cleartext-Password'
+           AND op = ':='
+           AND id <> COALESCE((SELECT id FROM keeper), -1)
+        RETURNING 1
+    ),
+    updated AS (
+        UPDATE radcheck
+           SET value = (SELECT password FROM desired)
+         WHERE id = (SELECT id FROM keeper)
+           AND value <> (SELECT password FROM desired)
+        RETURNING 1
+    ),
+    inserted AS (
+        INSERT INTO radcheck (username, attribute, op, value)
+        SELECT d.username, 'Cleartext-Password', ':=', d.password
+          FROM desired d
+         WHERE NOT EXISTS (SELECT 1 FROM keeper)
+        RETURNING 1
+    )
+    SELECT 'USER_SYNC=' ||
+           CASE
+             WHEN EXISTS (SELECT 1 FROM duplicates)
+               OR EXISTS (SELECT 1 FROM updated)
+               OR EXISTS (SELECT 1 FROM inserted)
+             THEN '1'
+             ELSE '0'
+           END;
+    SQL
+  args:
+    executable: /bin/bash
+  become_user: postgres
+  register: freeradius_extra_user_sync
+  changed_when: freeradius_extra_user_sync.stdout is search('USER_SYNC=1')
+  loop: "{{ freeradius_extra_users | default([]) }}"
+  when:
+    - (freeradius_extra_users | default([]) | length) > 0
+    - (vpn_auth_mode | default('local')) == 'radius'
+  loop_control:
+    label: "{{ item.username | default('') }}"
+  no_log: true
+
+- name: Validate RADIUS user group assignments
+  ansible.builtin.assert:
+    that:
+      - item.username is defined
+      - (item.username | string) | length > 0
+      - item.groupname is defined
+      - (item.groupname | string) | length > 0
+  loop: "{{ freeradius_user_group_assignments | default([]) }}"
+  when: (freeradius_user_group_assignments | default([]) | length) > 0
+  loop_control:
+    label: "{{ item.username | default('') }} -> {{ item.groupname | default('') }}"
+
+- name: Ensure RADIUS user group assignments exist (radusergroup)
+  ansible.builtin.shell: |
+    set -o pipefail
+    psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 <<'SQL'
+    UPDATE {{ freeradius_sql_usergroup_table }}
+       SET priority = {{ item.priority | default(0) | int }}
+     WHERE username = '{{ (item.username | string) | replace("'", "''") }}'
+       AND groupname = '{{ (item.groupname | string) | replace("'", "''") }}'
+       AND priority IS DISTINCT FROM {{ item.priority | default(0) | int }};
+
+    INSERT INTO {{ freeradius_sql_usergroup_table }} (username, groupname, priority)
+    SELECT '{{ (item.username | string) | replace("'", "''") }}',
+           '{{ (item.groupname | string) | replace("'", "''") }}',
+           {{ item.priority | default(0) | int }}
+     WHERE NOT EXISTS (
+       SELECT 1
+         FROM {{ freeradius_sql_usergroup_table }}
+        WHERE username = '{{ (item.username | string) | replace("'", "''") }}'
+          AND groupname = '{{ (item.groupname | string) | replace("'", "''") }}'
+     );
+    SQL
+  args:
+    executable: /bin/bash
+  become_user: postgres
+  changed_when: false
+  loop: "{{ freeradius_user_group_assignments | default([]) }}"
+  when: (freeradius_user_group_assignments | default([]) | length) > 0
+  loop_control:
+    label: "{{ item.username | default('') }} -> {{ item.groupname | default('') }}"
+
+- name: Deploy radacct cleanup script
+  ansible.builtin.template:
+    src: radacct_cleanup.sh.j2
+    dest: "{{ freeradius_radacct_cleanup_script_path }}"
+    owner: postgres
+    group: postgres
+    mode: '0750'
+  when: freeradius_radacct_cleanup_enable | default(false) | bool
+
+- name: Remove radacct cleanup script when disabled
+  ansible.builtin.file:
+    path: "{{ freeradius_radacct_cleanup_script_path }}"
+    state: absent
+  when: not (freeradius_radacct_cleanup_enable | default(false) | bool)
+
+- name: Schedule radacct cleanup cron job
+  ansible.builtin.cron:
+    name: "FreeRADIUS radacct cleanup"
+    user: postgres
+    minute: "{{ freeradius_radacct_cleanup_cron.minute | default('*/15') }}"
+    hour: "{{ freeradius_radacct_cleanup_cron.hour | default('*') }}"
+    day: "{{ freeradius_radacct_cleanup_cron.day | default('*') }}"
+    month: "{{ freeradius_radacct_cleanup_cron.month | default('*') }}"
+    weekday: "{{ freeradius_radacct_cleanup_cron.weekday | default('*') }}"
+    job: "{{ freeradius_radacct_cleanup_script_path }}"
+    state: present
+  when: freeradius_radacct_cleanup_enable | default(false) | bool
+
+- name: Remove radacct cleanup cron job when disabled
+  ansible.builtin.cron:
+    name: "FreeRADIUS radacct cleanup"
+    user: postgres
+    state: absent
+  when: not (freeradius_radacct_cleanup_enable | default(false) | bool)
+
+- name: Build VPN RADIUS clients list
+  ansible.builtin.set_fact:
+    freeradius_vpn_clients: "{{ (freeradius_vpn_clients | default([])) + (
+      [{
+        'name': item,
+        'ip': (hostvars[item].mgmt_wireguard_wireguard_ip | default(hostvars[item].ansible_host | default(item))),
+        'secret': freeradius_client_secret
+      }] if (hostvars[item].ansible_host | default(item)) != freeradius_localhost_client_addr else []
+    ) }}"
+  loop: "{{ groups['vpn'] | default([]) }}"
+
+- name: Compose final RADIUS clients definition
+  ansible.builtin.set_fact:
+    freeradius_clients: "{{ freeradius_extra_clients }}"
+    freeradius_nas_clients: "{{ (freeradius_vpn_clients | default([])) + freeradius_extra_clients }}"
+
+- name: Ensure localhost client is managed in NAS
+  ansible.builtin.set_fact:
+    freeradius_nas_clients: >-
+      {{
+        [{
+          'name': freeradius_localhost_client_name,
+          'ip': freeradius_localhost_client_addr,
+          'secret': freeradius_client_secret,
+          'type': 'other',
+          'description': freeradius_nas_default_description
+        }] + freeradius_nas_clients
+      }}
+  when:
+    - freeradius_manage_localhost_client | default(true) | bool
+    - (freeradius_nas_clients | selectattr('ip', 'equalto', freeradius_localhost_client_addr) | list | length) == 0
+
+- name: Ensure management WireGuard IP is managed as a RADIUS client (for local radtest)
+  ansible.builtin.set_fact:
+    freeradius_nas_clients: >-
+      {{
+        [{
+          'name': inventory_hostname ~ '_wg',
+          'ip': (mgmt_wireguard_wireguard_ip | default('') | trim),
+          'secret': freeradius_client_secret,
+          'type': 'other',
+          'description': freeradius_nas_default_description
+        }] + freeradius_nas_clients
+      }}
+  when:
+    - (mgmt_wireguard_wireguard_ip | default('') | trim) | length > 0
+    - (freeradius_nas_clients | selectattr('ip', 'equalto', (mgmt_wireguard_wireguard_ip | trim)) | list | length) == 0
+
+- name: Validate NAS client definitions
+  ansible.builtin.assert:
+    that:
+      - item.ip is defined
+      - (item.secret | default(freeradius_client_secret)) | length > 0
+    fail_msg: "Each NAS client must define 'ip' and 'secret'. Offending entry: {{ item }}"
+  loop: "{{ freeradius_nas_clients | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default(item.ip) }}"
+
+- name: Normalize NAS client definitions
+  ansible.builtin.set_fact:
+    freeradius_nas_clients_render_map: "{{ (freeradius_nas_clients_render_map | default({})) | combine({
+      item.ip: {
+        'nasname': item.ip,
+        'shortname': ((item.shortname | default(item.name | default(item.ip))) | regex_replace('[^A-Za-z0-9_-]', '_')),
+        'type': item.type | default('other'),
+        'ports': item.ports if (item.ports is defined) else None,
+        'secret': item.secret | default(freeradius_client_secret),
+        'server': item.server if (item.server is defined) else None,
+        'community': item.community if (item.community is defined) else None,
+        'description': item.description | default(freeradius_nas_default_description),
+        'virtual_server': item.virtual_server if (item.virtual_server is defined) else None
+      }
+    }) }}"
+  loop: "{{ freeradius_nas_clients | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default(item.ip) }}"
+
+- name: Prepare NAS client render list
+  ansible.builtin.set_fact:
+    freeradius_nas_clients_render: "{{ (freeradius_nas_clients_render_map | default({})) | dict2items | map(attribute='value') | list }}"
+
+- name: Build NAS secret mask list
+  ansible.builtin.set_fact:
+    freeradius_nas_secret_tokens: "{{ (freeradius_nas_clients_render | default([])) | map(attribute='secret') | select('string') | list | unique }}"
+  when: (freeradius_nas_clients_render | default([])) | length > 0
+
+- name: Ensure NAS table exists
+  ansible.builtin.command:
+    cmd: >
+      psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+        CREATE TABLE IF NOT EXISTS nas (
+          id SERIAL PRIMARY KEY,
+          nasname text NOT NULL,
+          shortname text NOT NULL,
+          type text NOT NULL DEFAULT 'other',
+          ports integer,
+          secret text NOT NULL,
+          server text,
+          community text,
+          description text,
+          require_ma text NOT NULL DEFAULT 'auto',
+          limit_proxy_state text NOT NULL DEFAULT 'auto'
+        );
+        CREATE INDEX IF NOT EXISTS nas_nasname ON nas (nasname);
+      "
+  become_user: postgres
+  when: (freeradius_nas_clients_render | default([])) | length > 0
+  changed_when: false
+
+- name: Remove duplicate NAS rows
+  ansible.builtin.command:
+    cmd: >
+      psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+        WITH ranked AS (
+          SELECT id,
+                 ROW_NUMBER() OVER (PARTITION BY nasname ORDER BY id) AS rn
+          FROM nas
+        ),
+        dups AS (
+          SELECT id FROM ranked WHERE rn > 1
+        )
+        DELETE FROM nas WHERE id IN (SELECT id FROM dups);
+      "
+  become_user: postgres
+  when: (freeradius_nas_clients_render | default([])) | length > 0
+  register: freeradius_nas_dedup
+  changed_when: "'DELETE 0' not in (freeradius_nas_dedup.stdout | default(''))"
+
+- name: Ensure NAS table columns are present
+  ansible.builtin.command:
+    cmd: >
+      psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c "
+        ALTER TABLE nas
+          ADD COLUMN IF NOT EXISTS server text,
+          ADD COLUMN IF NOT EXISTS community text,
+          ADD COLUMN IF NOT EXISTS description text,
+          ADD COLUMN IF NOT EXISTS require_ma text NOT NULL DEFAULT 'auto',
+          ADD COLUMN IF NOT EXISTS limit_proxy_state text NOT NULL DEFAULT 'auto',
+          ADD COLUMN IF NOT EXISTS virtual_server text;
+      "
+  become_user: postgres
+  when: (freeradius_nas_clients_render | default([])) | length > 0
+  changed_when: false
+
+- name: Render NAS synchronization SQL
+  ansible.builtin.template:
+    src: manage_nas.sql.j2
+    dest: /tmp/freeradius_manage_nas.sql
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  vars:
+    freeradius_nas_clients_render: "{{ freeradius_nas_clients_render | default([]) }}"
+  when: (freeradius_nas_clients_render | default([])) | length > 0
+  no_log: true
+
+- name: Sync NAS table with declared clients
+  ansible.builtin.command:
+    cmd: >
+      psql -d {{ freeradius_db_name }} -tA -q -v ON_ERROR_STOP=1 -f /tmp/freeradius_manage_nas.sql
+  become_user: postgres
+  register: freeradius_manage_nas_sync
+  when: (freeradius_nas_clients_render | default([])) | length > 0
+  changed_when: (freeradius_manage_nas_sync.rc == 0) and (freeradius_manage_nas_sync.stdout is search('NAS_SYNC=1'))
+  failed_when: false
+  no_log: true
+
+- name: Capture NAS sync failure payload
+  ansible.builtin.set_fact:
+    freeradius_manage_nas_failure_message: "{{ freeradius_manage_nas_sync.stderr | default(freeradius_manage_nas_sync.stdout) | default('NAS synchronization failed without error output.') }}"
+  when:
+    - (freeradius_nas_clients_render | default([])) | length > 0
+    - freeradius_manage_nas_sync.rc | default(0) != 0
+  no_log: true
+
+- name: Mask secrets in NAS sync failure payload
+  ansible.builtin.set_fact:
+    freeradius_manage_nas_failure_message: "{{ freeradius_manage_nas_failure_message | regex_replace(item | regex_escape, '***') }}"
+  loop: "{{ freeradius_nas_secret_tokens | default([]) }}"
+  loop_control:
+    label: "***"
+  when:
+    - (freeradius_nas_clients_render | default([])) | length > 0
+    - freeradius_manage_nas_sync.rc | default(0) != 0
+    - (freeradius_nas_secret_tokens | default([])) | length > 0
+  no_log: true
+
+- name: Surface NAS sync failure
+  ansible.builtin.fail:
+    msg: "{{ freeradius_manage_nas_failure_message }}"
+  when:
+    - (freeradius_nas_clients_render | default([])) | length > 0
+    - freeradius_manage_nas_sync.rc | default(0) != 0
+
+- name: Remove temporary NAS SQL script
+  ansible.builtin.file:
+    path: /tmp/freeradius_manage_nas.sql
+    state: absent
+  when: (freeradius_nas_clients_render | default([])) | length > 0
+
+- name: Render FreeRADIUS SQL module configuration
+  ansible.builtin.template:
+    src: sql-mod.j2
+    dest: "{{ freeradius_conf_dir }}/mods-available/sql"
+    owner: root
+    group: freerad
+    mode: '0640'
+  notify: Restart FreeRADIUS
+  no_log: true
+
+- name: Enable SQL module
+  ansible.builtin.file:
+    src: "{{ freeradius_conf_dir }}/mods-available/sql"
+    dest: "{{ freeradius_conf_dir }}/mods-enabled/sql"
+    owner: root
+    group: freerad
+    state: link
+    force: true
+  notify: Restart FreeRADIUS
+
+- name: Render FreeRADIUS default site configuration
+  ansible.builtin.template:
+    src: default.site.j2
+    dest: "{{ freeradius_conf_dir }}/sites-available/default"
+    owner: root
+    group: freerad
+    mode: '0640'
+  notify: Restart FreeRADIUS
+
+- name: Detect Prometheus module availability (known paths)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ (freeradius_prometheus_module_path_candidates | default([])) | unique }}"
+  register: freeradius_prometheus_module_candidates
+  when: freeradius_prometheus_enable | bool
+  changed_when: false
+  failed_when: false
+
+- name: Find Prometheus module under /usr/lib if not found in known paths
+  ansible.builtin.find:
+    paths:
+      - "/usr/lib"
+      - "/usr/lib64"
+      - "/usr/local/lib"
+    patterns:
+      - "rlm_prometheus.so"
+    file_type: file
+    recurse: true
+  register: freeradius_prometheus_module_find
+  when:
+    - freeradius_prometheus_enable | bool
+    - (freeradius_prometheus_module_candidates.results | selectattr('stat.exists', 'equalto', true) | list | length) == 0
+  changed_when: false
+  failed_when: false
+
+- name: Determine Prometheus availability
+  ansible.builtin.set_fact:
+    freeradius_prometheus_module_path_effective: >-
+      {{
+        (
+          (freeradius_prometheus_module_candidates.results | selectattr('stat.exists', 'equalto', true) | map(attribute='item') | list)
+          + ((freeradius_prometheus_module_find.files | default([])) | map(attribute='path') | list)
+        )
+        | first
+        | default('', true)
+      }}
+    freeradius_prometheus_available: >-
+      {{
+        (
+          (freeradius_prometheus_module_candidates.results | selectattr('stat.exists', 'equalto', true) | list | length) > 0
+          or ((freeradius_prometheus_module_find.matched | default(0) | int) > 0)
+        )
+      }}
+  when: freeradius_prometheus_enable | bool
+
+- name: Warn when FreeRADIUS Prometheus endpoint cannot be enabled
+  ansible.builtin.debug:
+    msg: >-
+      freeradius_prometheus_enable is true, but rlm_prometheus.so was not found.
+      Falling back to the built-in Status-Server exporter on {{ freeradius_prometheus_listen_ip }}:{{ freeradius_prometheus_listen_port }}.
+  when:
+    - freeradius_prometheus_enable | bool
+    - not (freeradius_prometheus_available | default(false))
+
+- name: Render FreeRADIUS Prometheus module configuration
+  ansible.builtin.template:
+    src: prometheus.mod.j2
+    dest: "{{ freeradius_conf_dir }}/mods-available/prometheus"
+    owner: root
+    group: freerad
+    mode: '0640'
+  when:
+    - freeradius_prometheus_enable | bool
+    - freeradius_prometheus_available | default(false)
+  notify: Restart FreeRADIUS
+
+- name: Enable Prometheus module
+  ansible.builtin.file:
+    src: "{{ freeradius_conf_dir }}/mods-available/prometheus"
+    dest: "{{ freeradius_conf_dir }}/mods-enabled/prometheus"
+    owner: root
+    group: freerad
+    state: link
+    force: true
+  when:
+    - freeradius_prometheus_enable | bool
+    - freeradius_prometheus_available | default(false)
+  notify: Restart FreeRADIUS
+
+- name: Deploy Prometheus virtual server
+  ansible.builtin.template:
+    src: prometheus.site.j2
+    dest: "{{ freeradius_conf_dir }}/sites-available/prometheus"
+    owner: root
+    group: freerad
+    mode: '0640'
+  when:
+    - freeradius_prometheus_enable | bool
+    - freeradius_prometheus_available | default(false)
+  notify: Restart FreeRADIUS
+
+- name: Enable Prometheus virtual server
+  ansible.builtin.file:
+    src: "{{ freeradius_conf_dir }}/sites-available/prometheus"
+    dest: "{{ freeradius_conf_dir }}/sites-enabled/prometheus"
+    owner: root
+    group: freerad
+    state: link
+    force: true
+  when:
+    - freeradius_prometheus_enable | bool
+    - freeradius_prometheus_available | default(false)
+  notify: Restart FreeRADIUS
+
+- name: Disable Prometheus module when unavailable
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ freeradius_conf_dir }}/mods-enabled/prometheus"
+    - "{{ freeradius_conf_dir }}/mods-available/prometheus"
+    - "{{ freeradius_conf_dir }}/sites-enabled/prometheus"
+    - "{{ freeradius_conf_dir }}/sites-available/prometheus"
+  when:
+    - freeradius_prometheus_enable | bool
+    - not (freeradius_prometheus_available | default(false))
+  notify: Restart FreeRADIUS
+
+- name: Render FreeRADIUS Status-Server virtual server (fallback)
+  ansible.builtin.template:
+    src: tuxedovpn-status.site.j2
+    dest: "{{ freeradius_conf_dir }}/sites-available/tuxedovpn-status"
+    owner: root
+    group: freerad
+    mode: '0640'
+  when:
+    - freeradius_prometheus_enable | bool
+    - freeradius_status_exporter_enable | default(true) | bool
+    - not (freeradius_prometheus_available | default(false))
+  notify: Restart FreeRADIUS
+
+- name: Enable FreeRADIUS Status-Server virtual server (fallback)
+  ansible.builtin.file:
+    src: "{{ freeradius_conf_dir }}/sites-available/tuxedovpn-status"
+    dest: "{{ freeradius_conf_dir }}/sites-enabled/tuxedovpn-status"
+    owner: root
+    group: freerad
+    state: link
+    force: true
+  when:
+    - freeradius_prometheus_enable | bool
+    - freeradius_status_exporter_enable | default(true) | bool
+    - not (freeradius_prometheus_available | default(false))
+  notify: Restart FreeRADIUS
+
+- name: Install TuxedoVPN FreeRADIUS Status exporter script (fallback)
+  ansible.builtin.template:
+    src: tuxedovpn-freeradius-status-exporter.py.j2
+    dest: /usr/local/bin/tuxedovpn_freeradius_status_exporter.py
+    owner: root
+    group: root
+    mode: '0755'
+  when:
+    - freeradius_prometheus_enable | bool
+    - freeradius_status_exporter_enable | default(true) | bool
+    - not (freeradius_prometheus_available | default(false))
+  notify: Restart TuxedoVPN FreeRADIUS status exporter
+  tags: ['freeradius', 'metrics']
+
+- name: Install TuxedoVPN FreeRADIUS Status exporter service (fallback)
+  ansible.builtin.template:
+    src: tuxedovpn-freeradius-status-exporter.service.j2
+    dest: /etc/systemd/system/tuxedovpn-freeradius-status-exporter.service
+    owner: root
+    group: root
+    mode: '0644'
+  when:
+    - freeradius_prometheus_enable | bool
+    - freeradius_status_exporter_enable | default(true) | bool
+    - not (freeradius_prometheus_available | default(false))
+  notify: Restart TuxedoVPN FreeRADIUS status exporter
+  tags: ['freeradius', 'metrics']
+
+- name: Ensure TuxedoVPN FreeRADIUS Status exporter is enabled and running (fallback)
+  ansible.builtin.systemd:
+    name: tuxedovpn-freeradius-status-exporter.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when:
+    - freeradius_prometheus_enable | bool
+    - freeradius_status_exporter_enable | default(true) | bool
+    - not (freeradius_prometheus_available | default(false))
+  tags: ['freeradius', 'metrics']
+
+- name: Ensure TuxedoVPN FreeRADIUS Status exporter is disabled when not needed
+  ansible.builtin.systemd:
+    name: tuxedovpn-freeradius-status-exporter.service
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  when: not (freeradius_prometheus_enable | default(false) | bool) or (freeradius_prometheus_available | default(false))
+  failed_when: false
+  tags: ['freeradius', 'metrics']
+
+- name: Remove FreeRADIUS Status-Server fallback config when not needed
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ freeradius_conf_dir }}/sites-enabled/tuxedovpn-status"
+    - "{{ freeradius_conf_dir }}/sites-available/tuxedovpn-status"
+  when: not (freeradius_prometheus_enable | default(false) | bool) or (freeradius_prometheus_available | default(false))
+  failed_when: false
+  notify: Restart FreeRADIUS
+
+- name: Render VPN policy definitions
+  ansible.builtin.template:
+    src: policy.d/vpn.j2
+    dest: "{{ freeradius_conf_dir }}/policy.d/vpn"
+    owner: root
+    group: freerad
+    mode: '0640'
+  notify: Restart FreeRADIUS
+
+- name: Render SQL counter module for simultaneous sessions
+  ansible.builtin.template:
+    src: sqlcounter_max_sessions.mod.j2
+    dest: "{{ freeradius_conf_dir }}/mods-available/sqlcounter_max_sessions"
+    owner: root
+    group: freerad
+    mode: '0640'
+  when: freeradius_enable_simultaneous_use | bool
+  notify: Restart FreeRADIUS
+
+- name: Enable SQL counter module for simultaneous sessions
+  ansible.builtin.file:
+    src: "{{ freeradius_conf_dir }}/mods-available/sqlcounter_max_sessions"
+    dest: "{{ freeradius_conf_dir }}/mods-enabled/sqlcounter_max_sessions"
+    owner: root
+    group: freerad
+    state: link
+    force: true
+  when: freeradius_enable_simultaneous_use | bool
+  notify: Restart FreeRADIUS
+
+- name: Render SQL counter module for daily data quota
+  ansible.builtin.template:
+    src: sqlcounter_daily_data.mod.j2
+    dest: "{{ freeradius_conf_dir }}/mods-available/sqlcounter_daily_data"
+    owner: root
+    group: freerad
+    mode: '0640'
+  when: freeradius_enable_daily_quota | bool
+  notify: Restart FreeRADIUS
+
+- name: Enable SQL counter module for daily data quota
+  ansible.builtin.file:
+    src: "{{ freeradius_conf_dir }}/mods-available/sqlcounter_daily_data"
+    dest: "{{ freeradius_conf_dir }}/mods-enabled/sqlcounter_daily_data"
+    owner: root
+    group: freerad
+    state: link
+    force: true
+  when: freeradius_enable_daily_quota | bool
+  notify: Restart FreeRADIUS
+
+- name: Render FreeRADIUS clients configuration
+  ansible.builtin.template:
+    src: clients.conf.j2
+    dest: "{{ freeradius_conf_dir }}/clients.conf"
+    owner: root
+    group: freerad
+    mode: '0640'
+  notify: Restart FreeRADIUS
+  no_log: true
+
+- name: Ensure FreeRADIUS service is running
+  ansible.builtin.service:
+    name: "{{ freeradius_radius_service_name }}"
+    state: started
+  tags: ['freeradius', 'service']
+
+- name: Deploy FreeRADIUS accounting (radacct) exporter script
+  ansible.builtin.template:
+    src: freeradius_accounting_exporter.py.j2
+    dest: /usr/local/bin/freeradius_accounting_exporter.py
+    owner: root
+    group: root
+    mode: '0755'
+  when: freeradius_accounting_exporter_enable | default(false) | bool
+  notify: Restart FreeRADIUS accounting exporter
+  tags: ['freeradius', 'metrics']
+
+- name: Install FreeRADIUS accounting exporter systemd unit
+  ansible.builtin.template:
+    src: freeradius-accounting-exporter.service.j2
+    dest: /etc/systemd/system/freeradius-accounting-exporter.service
+    owner: root
+    group: root
+    mode: '0644'
+  when: freeradius_accounting_exporter_enable | default(false) | bool
+  notify: Restart FreeRADIUS accounting exporter
+  tags: ['freeradius', 'metrics']
+
+- name: Ensure FreeRADIUS accounting exporter is enabled and running
+  ansible.builtin.systemd:
+    name: freeradius-accounting-exporter.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: freeradius_accounting_exporter_enable | default(false) | bool
+  tags: ['freeradius', 'metrics']
+
+- name: Ensure FreeRADIUS accounting exporter is disabled when not requested
+  ansible.builtin.systemd:
+    name: freeradius-accounting-exporter.service
+    enabled: false
+    state: stopped
+  when: not (freeradius_accounting_exporter_enable | default(false) | bool)
+  failed_when: false
+  tags: ['freeradius', 'metrics']
+
+- name: Flush handlers before validating default VPN user
+  when:
+    - freeradius_validate_vpn_user | default(true) | bool
+    - freeradius_manage_vpn_user | default(true) | bool
+    - (vpn_auth_mode | default('local')) == 'radius'
+  tags: ['freeradius', 'validation']
+  block:
+    - name: Apply pending FreeRADIUS changes
+      meta: flush_handlers
+
+# A quick radtest validates that FreeRADIUS can authenticate (use a dedicated selftest user to avoid blocklist flapping).
+- name: Validate RADIUS authentication via selftest user
+  when:
+    - freeradius_validate_vpn_user | default(true) | bool
+    - freeradius_manage_vpn_user | default(true) | bool
+    - (vpn_auth_mode | default('local')) == 'radius'
+  tags: ['freeradius', 'validation']
+  block:
+    - name: Prepare radtest selftest user (SQL-safe)
+      ansible.builtin.set_fact:
+        freeradius_radtest_username: "{{ freeradius_radtest_selftest_username }}"
+        freeradius_radtest_password: "{{ freeradius_radtest_selftest_password }}"
+        freeradius_radtest_username_sql: "{{ (freeradius_radtest_selftest_username | default('')) | replace(\"'\", \"''\") }}"
+        freeradius_radtest_password_sql: "{{ (freeradius_radtest_selftest_password | default('')) | replace(\"'\", \"''\") }}"
+      changed_when: false
+      no_log: true
+
+    - name: Ensure radtest selftest user is not blocklisted
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c
+          "DELETE FROM vpn_user_blocklist WHERE username = '{{ freeradius_radtest_username_sql }}';"
+      become_user: postgres
+      changed_when: false
+      failed_when: false
+
+    - name: Create temporary radcheck entry for radtest selftest user
+      ansible.builtin.shell: |
+        set -o pipefail
+        psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 <<'SQL'
+        DELETE FROM {{ freeradius_sql_authcheck_table }}
+         WHERE username = '{{ freeradius_radtest_username_sql }}'
+           AND attribute = 'Cleartext-Password'
+           AND op = ':=';
+        INSERT INTO {{ freeradius_sql_authcheck_table }} (username, attribute, op, value)
+        VALUES ('{{ freeradius_radtest_username_sql }}', 'Cleartext-Password', ':=', '{{ freeradius_radtest_password_sql }}');
+        SQL
+      args:
+        executable: /bin/bash
+      become_user: postgres
+      changed_when: false
+      no_log: true
+
+    - name: Ensure radtest selftest user is in admin group when admin-only NAS policy is enabled
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c
+          "INSERT INTO {{ freeradius_sql_usergroup_table }} (username, groupname, priority)
+           SELECT '{{ freeradius_radtest_username_sql }}', '{{ freeradius_admin_group_name | default('admins') | replace("'", "''") }}', 0
+            WHERE NOT EXISTS (
+              SELECT 1
+                FROM {{ freeradius_sql_usergroup_table }}
+               WHERE username = '{{ freeradius_radtest_username_sql }}'
+                 AND groupname = '{{ freeradius_admin_group_name | default('admins') | replace("'", "''") }}'
+            );"
+      become_user: postgres
+      changed_when: false
+      when: freeradius_admin_only_nas_enforce | default(false) | bool
+      no_log: true
+
+    - name: Clear stale radacct sessions for radtest selftest user
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c
+          "DELETE FROM radacct WHERE username = '{{ freeradius_radtest_username_sql }}' AND acctstoptime IS NULL;"
+      become_user: postgres
+      register: freeradius_radacct_pretest_cleanup
+      changed_when: "'DELETE' in (freeradius_radacct_pretest_cleanup.stdout | default(''))"
+      when: freeradius_radacct_cleanup_before_test | default(false) | bool
+
+    - name: Run radtest against localhost for selftest user
+      ansible.builtin.command:
+        argv:
+          - radtest
+          - "{{ freeradius_radtest_username }}"
+          - "{{ freeradius_radtest_password }}"
+          - "{{ freeradius_radtest_server }}"
+          - "{{ freeradius_radtest_nas_port }}"
+          - "{{ freeradius_client_secret }}"
+          - "{{ freeradius_radtest_nas_ip }}"
+      register: freeradius_radtest_check
+      changed_when: false
+      retries: "{{ freeradius_radtest_retries | default(1) }}"
+      delay: "{{ freeradius_radtest_delay | default(3) }}"
+      until: freeradius_radtest_check.rc == 0
+      no_log: true
+
+    - name: Ensure radtest succeeded for selftest user
+      ansible.builtin.assert:
+        that:
+          - freeradius_radtest_check.rc == 0
+        fail_msg: "FreeRADIUS rejected the radtest selftest user during verification. Enable freeradius_debug for diagnostics."
+  rescue:
+    - name: Show sanitized radtest output (debug)
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            (
+              (freeradius_radtest_check.stdout | default(''))
+              ~ '\n'
+              ~ (freeradius_radtest_check.stderr | default(''))
+            )
+            | regex_replace('(?m)^\\s*User-Password\\s*=\\s*.*$', '    User-Password = ***')
+          }}
+      when: freeradius_debug | default(false) | bool
+
+    - name: Show FreeRADIUS service status (debug)
+      ansible.builtin.command: systemctl --no-pager --full status "{{ freeradius_radius_service_name }}"
+      register: freeradius_debug_systemctl_status
+      changed_when: false
+      failed_when: false
+      when: freeradius_debug | default(false) | bool
+
+    - name: Print FreeRADIUS service status (debug)
+      ansible.builtin.debug:
+        var: freeradius_debug_systemctl_status.stdout_lines
+      when: freeradius_debug | default(false) | bool
+
+    - name: Show FreeRADIUS journal logs (debug)
+      ansible.builtin.command: journalctl -u "{{ freeradius_radius_service_name }}" --no-pager -n 200
+      register: freeradius_debug_journalctl
+      changed_when: false
+      failed_when: false
+      when: freeradius_debug | default(false) | bool
+
+    - name: Print FreeRADIUS journal logs (debug)
+      ansible.builtin.debug:
+        var: freeradius_debug_journalctl.stdout_lines
+      when: freeradius_debug | default(false) | bool
+
+    - name: Show FreeRADIUS log file tail (debug)
+      ansible.builtin.shell: |
+        set -o pipefail
+        for f in /var/log/freeradius/radius.log /var/log/freeradius/*.log; do
+          test -f "$f" || continue
+          echo "===== $f (tail -n 200) ====="
+          tail -n 200 "$f"
+        done
+      args:
+        executable: /bin/bash
+      register: freeradius_debug_logfiles
+      changed_when: false
+      failed_when: false
+      when: freeradius_debug | default(false) | bool
+
+    - name: Print FreeRADIUS log file tail (debug)
+      ansible.builtin.debug:
+        var: freeradius_debug_logfiles.stdout_lines
+      when: freeradius_debug | default(false) | bool
+
+    - name: Check RADIUS listener ports (debug)
+      ansible.builtin.shell: |
+        set -o pipefail
+        ss -lunpt | awk '$0 ~ /:(1812|1813)\\b/ {print}'
+      args:
+        executable: /bin/bash
+      register: freeradius_debug_ss
+      changed_when: false
+      failed_when: false
+      when: freeradius_debug | default(false) | bool
+
+    - name: Print RADIUS listener ports (debug)
+      ansible.builtin.debug:
+        var: freeradius_debug_ss.stdout_lines
+      when: freeradius_debug | default(false) | bool
+
+    - name: Validate FreeRADIUS configuration (debug)
+      ansible.builtin.command: freeradius -XC
+      register: freeradius_debug_configcheck
+      changed_when: false
+      failed_when: false
+      when: freeradius_debug | default(false) | bool
+
+    - name: Print FreeRADIUS configuration check output (debug)
+      ansible.builtin.debug:
+        var: freeradius_debug_configcheck.stdout_lines
+      when: freeradius_debug | default(false) | bool
+
+    - name: Verify radcheck entry exists (debug)
+      ansible.builtin.command:
+        cmd: >-
+          psql -d {{ freeradius_db_name }}
+          -tAc "SELECT COUNT(*) FROM {{ freeradius_sql_authcheck_table }} WHERE username = '{{ freeradius_managed_vpn_username_sql }}';"
+      become_user: postgres
+      register: freeradius_debug_radcheck_count
+      changed_when: false
+      failed_when: false
+      when: freeradius_debug | default(false) | bool
+
+    - name: Print radcheck entry count (debug)
+      ansible.builtin.debug:
+        msg: "radcheck rows for {{ freeradius_managed_vpn_username }}: {{ (freeradius_debug_radcheck_count.stdout | default('') | trim) }}"
+      when: freeradius_debug | default(false) | bool
+
+    - name: Fail with radtest hint
+      ansible.builtin.fail:
+        msg: >-
+          radtest failed for the FreeRADIUS selftest user. Re-run with `-e freeradius_debug=true`
+          and check `journalctl -u {{ freeradius_radius_service_name }}` (or run `freeradius -X` on the server).
+  always:
+    - name: Cleanup radtest selftest DB rows
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c
+          "DELETE FROM vpn_user_blocklist WHERE username = '{{ freeradius_radtest_username_sql | default('') }}';
+           DELETE FROM {{ freeradius_sql_usergroup_table }} WHERE username = '{{ freeradius_radtest_username_sql | default('') }}';
+           DELETE FROM {{ freeradius_sql_authcheck_table }} WHERE username = '{{ freeradius_radtest_username_sql | default('') }}' AND attribute = 'Cleartext-Password' AND op = ':=';"
+      become_user: postgres
+      changed_when: false
+      failed_when: false
+
+- name: Validate RADIUS blocklist enforcement
+  when:
+    - freeradius_validate_blocklist | default(true) | bool
+    - freeradius_enable_blocklist | default(false) | bool
+    - (vpn_auth_mode | default('local')) == 'radius'
+  tags: ['freeradius', 'validation']
+  block:
+    - name: Prepare blocklist selftest username (SQL-safe)
+      ansible.builtin.set_fact:
+        freeradius_blocklist_selftest_username_sql: "{{ freeradius_blocklist_selftest_username | regex_replace(\"'\", \"''\") }}"
+        freeradius_blocklist_selftest_password_sql: "{{ freeradius_blocklist_selftest_password | regex_replace(\"'\", \"''\") }}"
+      changed_when: false
+
+    - name: Cleanup stale blocklist selftest rows
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c
+          "DELETE FROM vpn_user_blocklist WHERE username = '{{ freeradius_blocklist_selftest_username_sql }}';
+           DELETE FROM {{ freeradius_sql_authcheck_table }} WHERE username = '{{ freeradius_blocklist_selftest_username_sql }}';"
+      become_user: postgres
+      changed_when: false
+      failed_when: false
+
+    - name: Create temporary radcheck entry for blocklist selftest user
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c
+          "INSERT INTO {{ freeradius_sql_authcheck_table }} (username, attribute, op, value)
+           VALUES ('{{ freeradius_blocklist_selftest_username_sql }}', 'Cleartext-Password', ':=', '{{ freeradius_blocklist_selftest_password_sql }}');"
+      become_user: postgres
+      register: freeradius_blocklist_selftest_radcheck_insert
+      changed_when: false
+      failed_when: freeradius_blocklist_selftest_radcheck_insert.rc != 0
+      no_log: true
+
+    - name: Ensure blocklist selftest user is in admin group when admin-only NAS policy is enabled
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c
+          "INSERT INTO {{ freeradius_sql_usergroup_table }} (username, groupname, priority)
+           SELECT '{{ freeradius_blocklist_selftest_username_sql }}', '{{ freeradius_admin_group_name | default('admins') | replace("'", "''") }}', 0
+            WHERE NOT EXISTS (
+              SELECT 1
+                FROM {{ freeradius_sql_usergroup_table }}
+               WHERE username = '{{ freeradius_blocklist_selftest_username_sql }}'
+                 AND groupname = '{{ freeradius_admin_group_name | default('admins') | replace("'", "''") }}'
+            );"
+      become_user: postgres
+      changed_when: false
+      when: freeradius_admin_only_nas_enforce | default(false) | bool
+      no_log: true
+
+    - name: Ensure blocklist selftest user is accepted before inserting block
+      ansible.builtin.command:
+        argv:
+          - radtest
+          - "{{ freeradius_blocklist_selftest_username }}"
+          - "{{ freeradius_blocklist_selftest_password }}"
+          - "{{ freeradius_radtest_server }}"
+          - "{{ freeradius_radtest_nas_port }}"
+          - "{{ freeradius_client_secret }}"
+          - "{{ freeradius_radtest_nas_ip }}"
+      register: freeradius_blocklist_selftest_accept
+      changed_when: false
+      failed_when: freeradius_blocklist_selftest_accept.rc != 0
+      no_log: true
+
+    - name: Insert temporary vpn_user_blocklist row for selftest user
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c
+          "INSERT INTO vpn_user_blocklist (username, reason, created_at, expires_at)
+           VALUES ('{{ freeradius_blocklist_selftest_username_sql }}', 'SELFTEST', NOW(),
+                   NOW() + ({{ freeradius_blocklist_selftest_block_seconds | int }} || ' seconds')::interval)
+           ON CONFLICT (username) DO UPDATE
+             SET reason = EXCLUDED.reason,
+                 created_at = NOW(),
+                 expires_at = EXCLUDED.expires_at;"
+      become_user: postgres
+      changed_when: false
+
+    - name: Ensure blocklist selftest user is rejected while blocked
+      ansible.builtin.command:
+        argv:
+          - radtest
+          - "{{ freeradius_blocklist_selftest_username }}"
+          - "{{ freeradius_blocklist_selftest_password }}"
+          - "{{ freeradius_radtest_server }}"
+          - "{{ freeradius_radtest_nas_port }}"
+          - "{{ freeradius_client_secret }}"
+          - "{{ freeradius_radtest_nas_ip }}"
+      register: freeradius_blocklist_selftest_reject
+      changed_when: false
+      failed_when: >-
+        (
+          ('Access-Reject' not in (freeradius_blocklist_selftest_reject.stdout | default('')))
+          and ('Access-Reject' not in (freeradius_blocklist_selftest_reject.stderr | default('')))
+        )
+      no_log: true
+  rescue:
+    - name: Show sanitized blocklist selftest failure (debug)
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            (
+              (ansible_failed_result.stderr | default(''))
+              ~ '\n'
+              ~ (ansible_failed_result.stdout | default(''))
+              ~ '\n'
+              ~ (ansible_failed_result.msg | default(''))
+            )
+            | regex_replace((freeradius_blocklist_selftest_password | default('')) | regex_escape, '***')
+          }}
+      when: ansible_failed_result is defined
+
+    - name: Collect blocklist selftest schema info (debug)
+      ansible.builtin.command:
+        cmd: >-
+          psql -d {{ freeradius_db_name }} -tAc
+          "SELECT
+             to_regclass('public.{{ freeradius_sql_authcheck_table }}') AS authcheck_table,
+             to_regclass('public.vpn_user_blocklist') AS blocklist_table;"
+      become_user: postgres
+      register: freeradius_blocklist_selftest_schema_tables
+      changed_when: false
+      failed_when: false
+
+    - name: Show schema tables presence (debug)
+      ansible.builtin.debug:
+        var: freeradius_blocklist_selftest_schema_tables.stdout
+      when: freeradius_blocklist_selftest_schema_tables is defined
+
+    - name: Collect authcheck columns (debug)
+      ansible.builtin.command:
+        cmd: >-
+          psql -d {{ freeradius_db_name }} -tAc
+          "SELECT column_name || ':' || data_type
+             FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = '{{ freeradius_sql_authcheck_table }}'
+            ORDER BY ordinal_position;"
+      become_user: postgres
+      register: freeradius_blocklist_selftest_authcheck_columns
+      changed_when: false
+      failed_when: false
+
+    - name: Show authcheck columns (debug)
+      ansible.builtin.debug:
+        var: freeradius_blocklist_selftest_authcheck_columns.stdout_lines
+      when: freeradius_blocklist_selftest_authcheck_columns is defined
+
+    - name: Fail blocklist validation with hint
+      ansible.builtin.fail:
+        msg: >-
+          Blocklist validation failed while inserting/using the temporary selftest user.
+          Re-run with `-e freeradius_debug=true` and check `journalctl -u {{ freeradius_radius_service_name }}`.
+  always:
+    - name: Cleanup blocklist selftest DB rows
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c
+          "DELETE FROM vpn_user_blocklist WHERE username = '{{ freeradius_blocklist_selftest_username_sql | default(freeradius_blocklist_selftest_username) }}';
+           DELETE FROM {{ freeradius_sql_usergroup_table }} WHERE username = '{{ freeradius_blocklist_selftest_username_sql | default(freeradius_blocklist_selftest_username) }}';
+           DELETE FROM {{ freeradius_sql_authcheck_table }} WHERE username = '{{ freeradius_blocklist_selftest_username_sql | default(freeradius_blocklist_selftest_username) }}';"
+      become_user: postgres
+      changed_when: false
+      failed_when: false

@@ -1,0 +1,10 @@
+# Managed by Ansible (role: common-vpn)
+{{ vpn_log_file }} {
+  daily
+  rotate 14
+  missingok
+  notifempty
+  compress
+  delaycompress
+  copytruncate
+}

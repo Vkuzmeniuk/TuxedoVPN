@@ -1,0 +1,85 @@
+# roles/common/tasks/ufw.yml
+
+- name: Ensure UFW is installed
+  ansible.builtin.package:
+    name: ufw
+    state: present
+  tags: [ufw]
+
+- name: Set default UFW policies (deny incoming, allow outgoing, deny routed)
+  community.general.ufw:
+    default: "{{ item.default }}"
+    direction: "{{ item.direction }}"
+  loop:
+    - { default: deny,  direction: incoming }
+    - { default: allow, direction: outgoing }
+    - { default: deny,  direction: routed }
+  tags: [ufw]
+
+# SSH (optional toggle)
+- name: Allow SSH
+  community.general.ufw:
+    rule: allow
+    port: "{{ ssh_port }}"
+    proto: tcp
+  when: manage_ssh | default(true) | bool
+  tags: [ufw]
+
+# Normalize the extra rule list (defaults and optional keys)
+- name: Normalize ufw_extra_rules
+  ansible.builtin.set_fact:
+    ufw_extra_rules_normalized: "{{ (ufw_extra_rules_normalized | default([])) + [ {
+      'action':    (item.action    | default('allow')),
+      'port':      (item.port      | string),
+      'proto':     (item.proto     | default('tcp')),
+      'direction': (item.direction | default('in')),
+      'route':     (item.route     | default(false)),
+      'interface': (item.interface | default('') | trim) | default(omit, true),
+      'interface_in': (item.interface_in | default('') | trim) | default(omit, true),
+      'interface_out': (item.interface_out | default('') | trim) | default(omit, true),
+      'src':       (item.src  | default('') | trim) | default(omit, true),
+      'dest':      (item.dest | default('') | trim) | default(omit, true)
+     } ] }}"
+  loop: "{{ (ufw_extra_rules | default([])) }}"
+  when: (ufw_extra_rules | default([])) | length > 0
+  tags: [ufw]
+
+# Regular (non-routed) rules
+- name: Apply UFW rules (normal)
+  community.general.ufw:
+    rule: "{{ item.action }}"
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+    direction: "{{ item.direction }}"
+    interface: "{{ item.interface | default(omit) }}"
+    src: "{{ item.src | default(omit) }}"
+    dest: "{{ item.dest | default(omit) }}"
+  loop: "{{ ufw_extra_rules_normalized | default([]) }}"
+  when:
+    - (ufw_extra_rules_normalized | default([])) | length > 0
+    - not (item.route | bool)
+  tags: [ufw]
+
+# Routed/forwarded rules (only when needed)
+- name: Apply UFW rules (routed/forwarded)
+  community.general.ufw:
+    rule: "{{ item.action }}"
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+    route: true
+    interface_in: "{{ item.interface_in | default(omit) }}"
+    interface_out: "{{ item.interface_out | default(omit) }}"
+    src: "{{ item.src | default(omit) }}"
+    dest: "{{ item.dest | default(omit) }}"
+  loop: "{{ ufw_extra_rules_normalized | default([]) }}"
+  when:
+    - (ufw_extra_rules_normalized | default([])) | length > 0
+    - item.route | bool
+  tags: [ufw]
+
+# Ensure UFW is enabled (without changing policies)
+- name: Ensure UFW is enabled
+  community.general.ufw:
+    state: enabled
+  when: ufw_enabled | default(true) | bool
+  tags: [ufw]

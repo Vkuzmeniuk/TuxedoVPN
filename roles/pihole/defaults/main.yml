@@ -1,0 +1,12 @@
+pihole_dns_permit_all_origins: false
+pihole_dns_permit_all_origins_conf_path: "/etc/dnsmasq.d/99-ansible-permit-all-origins.conf"
+pihole_dns_allowed_sources: []
+
+# Network interface used by Pi-hole during unattended install.
+# Leave empty to auto-detect from ansible_default_ipv4.interface.
+pihole_interface: ""
+
+# Optional allowlist for Pi-hole Web UI ports (defaults: 80/8443).
+# When set, broad allow rules for these ports are removed and only the specified
+# sources are allowed.
+pihole_webui_allowed_sources: []

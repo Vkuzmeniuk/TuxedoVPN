@@ -1,0 +1,188 @@
+---
+- name: Ensure RADIUS → Pi-hole sync prerequisites are present
+  ansible.builtin.package:
+    name:
+      - python3
+      - python3-psycopg2
+    state: present
+  tags: ["radius_pihole_sync", "packages"]
+
+- name: Create tuxedovpn config directory
+  ansible.builtin.file:
+    path: /etc/tuxedovpn
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags: ["radius_pihole_sync"]
+
+- name: Check Pi-hole gravity database presence
+  ansible.builtin.stat:
+    path: "{{ radius_pihole_sync_gravity_db_path }}"
+  register: _radius_pihole_sync_gravity_db_stat
+  changed_when: false
+  tags: ["radius_pihole_sync"]
+
+- name: Ensure Pi-hole gravity database exists
+  ansible.builtin.assert:
+    that:
+      - _radius_pihole_sync_gravity_db_stat.stat.exists | default(false)
+    fail_msg: >-
+      Pi-hole gravity database not found at {{ radius_pihole_sync_gravity_db_path }}.
+      Ensure role `pihole` is applied on mgmt before enabling radius-pihole-sync.
+  when: radius_pihole_sync_enable | bool
+  tags: ["radius_pihole_sync"]
+
+- name: Check sync DB password file presence (mgmt)
+  ansible.builtin.stat:
+    path: "{{ radius_pihole_sync_db_password_path }}"
+  register: _radius_pihole_sync_dbpass_stat
+  changed_when: false
+  tags: ["radius_pihole_sync"]
+
+- name: Generate sync DB password on mgmt when missing
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    python3 - <<'PY' > "{{ radius_pihole_sync_db_password_path }}"
+    import secrets
+    print(secrets.token_urlsafe(32))
+    PY
+  args:
+    executable: /bin/bash
+  when:
+    - radius_pihole_sync_enable | bool
+    - not (_radius_pihole_sync_dbpass_stat.stat.exists | default(false))
+  no_log: true
+  tags: ["radius_pihole_sync"]
+
+- name: Read effective sync DB password from file (mgmt)
+  ansible.builtin.slurp:
+    path: "{{ radius_pihole_sync_db_password_path }}"
+  register: _radius_pihole_sync_dbpass_slurp
+  when: radius_pihole_sync_enable | bool
+  no_log: true
+  tags: ["radius_pihole_sync"]
+
+- name: Set effective sync DB password fact (mgmt)
+  ansible.builtin.set_fact:
+    radius_pihole_sync_db_password_effective: "{{ _radius_pihole_sync_dbpass_slurp.content | b64decode | trim }}"
+  when: radius_pihole_sync_enable | bool
+  no_log: true
+  tags: ["radius_pihole_sync"]
+
+- name: Ensure effective sync DB password is available (mgmt)
+  ansible.builtin.assert:
+    that:
+      - (radius_pihole_sync_db_password_effective | default('') | trim | length) > 0
+    fail_msg: >-
+      Unable to determine radius_pihole_sync_db_password_effective from {{ radius_pihole_sync_db_password_path }}.
+  when: radius_pihole_sync_enable | bool
+  no_log: true
+  tags: ["radius_pihole_sync"]
+
+- name: Install Postgres pgpass file for sync service
+  ansible.builtin.template:
+    src: tuxedovpn-radius-pihole-sync.pgpass.j2
+    dest: "{{ radius_pihole_sync_pgpass_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: radius_pihole_sync_enable | bool
+  notify: Restart tuxedovpn RADIUS Pi-hole sync
+  no_log: true
+  tags: ["radius_pihole_sync"]
+
+- name: Ensure PostgreSQL login role for sync exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    psql -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM pg_roles WHERE rolname='{{ radius_pihole_sync_pg_user }}'" | grep -q 1 || \
+    psql -v ON_ERROR_STOP=1 -c "CREATE ROLE \"{{ radius_pihole_sync_pg_user }}\" WITH LOGIN PASSWORD '{{ radius_pihole_sync_db_password_effective }}';"
+    psql -v ON_ERROR_STOP=1 -c "ALTER ROLE \"{{ radius_pihole_sync_pg_user }}\" WITH PASSWORD '{{ radius_pihole_sync_db_password_effective }}';"
+  args:
+    executable: /bin/bash
+  become_user: postgres
+  when: radius_pihole_sync_enable | bool
+  changed_when: false
+  no_log: true
+  tags: ["radius_pihole_sync", "postgresql"]
+
+- name: Grant sync role minimal privileges (read-only)
+  ansible.builtin.command: >-
+    psql -d {{ radius_pihole_sync_pg_db }} -v ON_ERROR_STOP=1 -c
+    "GRANT CONNECT ON DATABASE \"{{ radius_pihole_sync_pg_db }}\" TO \"{{ radius_pihole_sync_pg_user }}\";
+     GRANT USAGE ON SCHEMA public TO \"{{ radius_pihole_sync_pg_user }}\";
+     GRANT SELECT ON TABLE radacct TO \"{{ radius_pihole_sync_pg_user }}\";
+     GRANT SELECT ON TABLE radusergroup TO \"{{ radius_pihole_sync_pg_user }}\";"
+  become_user: postgres
+  when: radius_pihole_sync_enable | bool
+  changed_when: false
+  tags: ["radius_pihole_sync", "postgresql"]
+
+- name: Install Postgres NOTIFY triggers for event-driven sync
+  ansible.builtin.template:
+    src: tuxedovpn-radius-pihole-sync-triggers.sql.j2
+    dest: /tmp/tuxedovpn-radius-pihole-sync-triggers.sql
+    owner: postgres
+    group: postgres
+    mode: "0644"
+  when: radius_pihole_sync_enable | bool
+  tags: ["radius_pihole_sync", "postgresql"]
+
+- name: Apply Postgres triggers
+  ansible.builtin.command: >-
+    psql -d {{ radius_pihole_sync_pg_db }} -v ON_ERROR_STOP=1 -f /tmp/tuxedovpn-radius-pihole-sync-triggers.sql
+  become_user: postgres
+  when: radius_pihole_sync_enable | bool
+  changed_when: false
+  tags: ["radius_pihole_sync", "postgresql"]
+
+- name: Install sync env file
+  ansible.builtin.template:
+    src: tuxedovpn-radius-pihole-sync.env.j2
+    dest: /etc/tuxedovpn/radius-pihole-sync.env
+    owner: root
+    group: root
+    mode: "0600"
+  when: radius_pihole_sync_enable | bool
+  notify: Restart tuxedovpn RADIUS Pi-hole sync
+  tags: ["radius_pihole_sync"]
+
+- name: Install sync agent script
+  ansible.builtin.template:
+    src: tuxedovpn-radius-pihole-sync.py.j2
+    dest: /usr/local/bin/tuxedovpn-radius-pihole-sync.py
+    owner: root
+    group: root
+    mode: "0755"
+  when: radius_pihole_sync_enable | bool
+  notify: Restart tuxedovpn RADIUS Pi-hole sync
+  tags: ["radius_pihole_sync"]
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: tuxedovpn-radius-pihole-sync.service.j2
+    dest: /etc/systemd/system/tuxedovpn-radius-pihole-sync.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart tuxedovpn RADIUS Pi-hole sync
+  tags: ["radius_pihole_sync"]
+
+- name: Ensure sync service is enabled and running
+  ansible.builtin.systemd:
+    name: tuxedovpn-radius-pihole-sync.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: radius_pihole_sync_enable | bool
+  tags: ["radius_pihole_sync", "service"]
+
+- name: Disable sync service when not enabled
+  ansible.builtin.systemd:
+    name: tuxedovpn-radius-pihole-sync.service
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  when: not (radius_pihole_sync_enable | bool)
+  tags: ["radius_pihole_sync", "service"]

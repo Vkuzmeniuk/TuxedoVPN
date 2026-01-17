@@ -1,0 +1,10 @@
+ansible_become_password: "change_me_become_password"
+grafana_admin_password: "change_me_grafana_admin_password"
+pihole_admin_password: "change_me_pihole_admin_password"
+
+# Certbot / Let’s Encrypt (optional, if you issue certificates from the mgmt or reverse-proxy host)
+vault_certbot_email: "admin@example.com"
+vault_certbot_dns_credentials_ini: |
+  # Example (Cloudflare):
+  # dns_cloudflare_api_token = "change_me"
+  dns_cloudflare_api_token = "change_me"

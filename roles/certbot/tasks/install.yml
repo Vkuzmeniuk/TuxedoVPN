@@ -1,0 +1,71 @@
+---
+- name: Ensure apt cache is up to date (Debian/Ubuntu)
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
+  when: ansible_pkg_mgr == "apt"
+
+- name: Install Certbot (APT)
+  ansible.builtin.apt:
+    name: "{{ [certbot_package] + (certbot_dns_plugin_packages | default([])) }}"
+    state: present
+    lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
+  when: ansible_pkg_mgr == "apt"
+
+- name: Install Certbot (generic)
+  ansible.builtin.package:
+    name: "{{ [certbot_package] + (certbot_dns_plugin_packages | default([])) }}"
+    state: present
+  when: ansible_pkg_mgr != "apt"
+
+- name: Ensure webroot directory exists (HTTP-01)
+  ansible.builtin.file:
+    path: "{{ certbot_webroot_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: certbot_method == "webroot"
+
+- name: Ensure nginx is installed (optional helper for HTTP-01)
+  ansible.builtin.package:
+    name: nginx
+    state: present
+  when:
+    - certbot_method == "webroot"
+    - certbot_manage_webroot_nginx | bool
+
+- name: Deploy nginx webroot config for ACME challenges
+  ansible.builtin.template:
+    src: letsencrypt-webroot.nginx.conf.j2
+    dest: "{{ certbot_webroot_nginx_conf_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - certbot_method == "webroot"
+    - certbot_manage_webroot_nginx | bool
+  notify: Reload nginx
+
+- name: Ensure nginx is enabled and running (optional helper)
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+  when:
+    - certbot_method == "webroot"
+    - certbot_manage_webroot_nginx | bool
+
+- name: Write DNS credentials file (when provided)
+  ansible.builtin.copy:
+    dest: "{{ certbot_dns_credentials_path }}"
+    content: "{{ certbot_dns_credentials_content }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - certbot_method == "dns"
+    - (certbot_dns_credentials_content | default('') | trim | length) > 0
+  no_log: true
+

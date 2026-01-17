@@ -1,0 +1,25 @@
+# Example host_vars for the management server (copy and adjust for your environment).
+# Keep real values (domains, public IPs, secrets) out of git.
+
+# TLS mode for this host.
+# To enable Certbot/Let’s Encrypt, set `tuxedovpn_tls_mode: "certbot"`.
+tuxedovpn_tls_mode: "selfsigned" # selfsigned | certbot
+
+# Hostname used for the mgmt/private VPN endpoint (ocserv).
+vpn_domain: "mgmt.example.com"
+vpn_network_address: "10.66.100.0"
+vpn_network_prefix_length: 24
+
+# mgmt services domains (optional, for the mgmt reverse proxy + Pi-hole DNS overrides).
+# These should resolve to the mgmt VPN gateway IP (usually `vpn_dns_client_ip`) in your internal DNS (Pi-hole).
+grafana_domain: "grafana.mgmt.example.com"
+prometheus_domain: "prometheus.mgmt.example.com"
+pihole_domain: "pihole.mgmt.example.com"
+
+# Enable internal reverse proxy for mgmt services on the mgmt VPN gateway IP.
+mgmt_reverse_proxy_enable: false
+# Keep mgmt services TLS self-signed by default (internal-only). Ocserv TLS can still use Certbot.
+mgmt_reverse_proxy_tls_mode: "selfsigned" # selfsigned | certbot
+
+# ocserv camouflage (optional hardening; set something unique per host)
+vpn_camouflage_secret_override: "change_me_camouflage_mgmt"

@@ -1,0 +1,32 @@
+# Managed by Ansible (role: mgmt-reverse-proxy)
+#
+# TLS termination for mgmt services.
+# Expected to listen on the mgmt VPN gateway IP (reachable only after VPN login).
+
+{% for svc in (mgmt_reverse_proxy_services | default([])) %}
+server {
+    listen {{ mgmt_reverse_proxy_bind_ip }}:{{ mgmt_reverse_proxy_https_port }} ssl;
+    server_name {{ svc.server_name }};
+
+    ssl_certificate     {{ mgmt_reverse_proxy_tls_fullchain_effective }};
+    ssl_certificate_key {{ mgmt_reverse_proxy_tls_key_effective }};
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    {% if svc.redirect_root_to is defined and (svc.redirect_root_to | string | trim | length) > 0 %}
+    location = / {
+        return 302 {{ svc.redirect_root_to }};
+    }
+    {% endif %}
+
+    location / {
+        proxy_pass {{ svc.upstream }};
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+{% endfor %}

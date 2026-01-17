@@ -1,0 +1,6 @@
+---
+- name: Restart tuxedovpn DPI blocker
+  ansible.builtin.systemd:
+    name: tuxedovpn-dpi-blocker.service
+    state: restarted
+    daemon_reload: true

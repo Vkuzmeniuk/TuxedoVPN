@@ -1,0 +1,26 @@
+---
+- name: Restart ocserv
+  ansible.builtin.service:
+    name: ocserv
+    state: restarted
+
+- name: Reload UFW rules
+  listen:
+    - Restart UFW
+    - ufw-restart
+  ansible.builtin.command: ufw --force reload
+  register: _common_vpn_ufw_reload
+  changed_when: >-
+    'reloaded' in ((_common_vpn_ufw_reload.stdout | default(''))
+                   ~ (_common_vpn_ufw_reload.stderr | default(''))).lower()
+
+- name: Restart ocserv Prometheus exporter
+  ansible.builtin.systemd:
+    name: ocserv-prometheus-exporter.service
+    state: restarted
+    daemon_reload: true
+
+- name: Restart fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    state: restarted

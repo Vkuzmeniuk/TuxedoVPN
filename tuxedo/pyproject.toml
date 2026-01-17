@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tuxedo"
+version = "0.1.0"
+description = "CLI tool to manage VPN users/groups via SQL (FreeRADIUS/PostgreSQL)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+postgres = ["psycopg2-binary>=2.9.9"]
+
+[project.scripts]
+tuxedo = "tuxedo.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

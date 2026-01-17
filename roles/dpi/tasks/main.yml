@@ -1,0 +1,246 @@
+---
+- name: Ensure DPI prerequisites are present
+  ansible.builtin.package:
+    name:
+      - suricata
+      - python3
+    state: present
+
+- name: Ensure DPI debug tools are present (optional)
+  ansible.builtin.package:
+    name: "{{ dpi_debug_tools_packages | default([]) }}"
+    state: present
+  when: dpi_install_debug_tools | default(false) | bool
+
+- name: Disable stock Suricata service (avoid conflicts with NFQUEUE unit)
+  ansible.builtin.systemd:
+    name: suricata.service
+    enabled: false
+    state: stopped
+  changed_when: false
+  failed_when: false
+
+- name: Derive Suricata HOME_NET subnets (VPN client networks)
+  ansible.builtin.set_fact:
+    dpi_suricata_home_nets_effective: >-
+      {{
+        (dpi_suricata_home_nets | default([]))
+        if (dpi_suricata_home_nets | default([]) | length) > 0
+        else (
+          (vpn_nat_subnets | default([]))
+          if (vpn_nat_subnets | default([]) | length) > 0
+          else (
+            [ (vpn_ipv4_network ~ '/' ~ (vpn_ipv4_prefix_length | default(24) | int)) ]
+            if (vpn_ipv4_network | default('') | trim | length) > 0
+            else []
+          )
+        )
+      }}
+  changed_when: false
+
+- name: Derive effective NFQUEUE number (must match firewall rules)
+  ansible.builtin.set_fact:
+    dpi_suricata_queue_num_effective: "{{ (vpn_nfqueue_num | default(dpi_suricata_queue_num | default(0))) | int }}"
+  changed_when: false
+
+- name: Ensure Suricata rule directory exists
+  ansible.builtin.file:
+    path: "{{ dpi_suricata_rule_dest | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy TuxedoVPN Suricata P2P rules (suricata.rules)
+  vars:
+    _dpi_suricata_rules_base: "{{ lookup('ansible.builtin.file', role_path ~ '/files/suricata.rules') }}"
+    _dpi_suricata_rules_local: "{{ lookup('ansible.builtin.file', role_path ~ '/files/tuxedovpn-local.rules') }}"
+    _dpi_suricata_rules_combined: >-
+      {{
+        _dpi_suricata_rules_base
+        ~ (
+          ('\n\n' ~ _dpi_suricata_rules_local)
+          if (dpi_suricata_append_local_rules | default(true) | bool)
+          else ''
+        )
+      }}
+    _dpi_suricata_rules_sanitized: >-
+      {{
+        (
+          _dpi_suricata_rules_combined
+          | regex_replace('to_lowercase;', '')
+          | regex_replace('(?m)^(?!#)(.*sid:2018532;.*)$', '# \\1')
+        )
+        if (dpi_suricata_comment_incompatible_rules | default(true) | bool)
+        else _dpi_suricata_rules_combined
+      }}
+    _dpi_suricata_rules_processed: >-
+      {{
+        (
+          _dpi_suricata_rules_sanitized
+          | regex_replace('(?m)^(drop|alert)\\s+http1\\s+', '\\1 http ')
+        )
+        if (dpi_suricata_convert_http1_to_http | default(true) | bool)
+        else _dpi_suricata_rules_sanitized
+      }}
+    _dpi_suricata_rules_final: >-
+      {{
+        (_dpi_suricata_rules_processed | regex_replace('(?m)^drop\\s+', 'alert '))
+        if (dpi_suricata_convert_drop_to_alert | default(false) | bool)
+        else _dpi_suricata_rules_processed
+      }}
+  ansible.builtin.copy:
+    dest: "{{ dpi_suricata_rule_dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: "{{ _dpi_suricata_rules_final }}"
+  notify: Restart tuxedovpn Suricata (NFQUEUE)
+
+- name: Ensure Suricata classification.config exists (required by the provided suricata.yaml)
+  block:
+    - name: Check Suricata classification.config source exists
+      ansible.builtin.stat:
+        path: "{{ dpi_suricata_classification_src }}"
+      register: _dpi_suricata_classification_src_stat
+      changed_when: false
+
+    - name: Fail when classification.config source is missing
+      ansible.builtin.assert:
+        that:
+          - _dpi_suricata_classification_src_stat.stat.exists | default(false)
+        fail_msg: >-
+          Suricata classification config not found at {{ dpi_suricata_classification_src }}.
+          Install the `suricata` package (it should provide this file) or override `dpi_suricata_classification_src`.
+
+    - name: Ensure Suricata classification.config is present at configured path
+      ansible.builtin.copy:
+        src: "{{ dpi_suricata_classification_src }}"
+        dest: "{{ dpi_suricata_classification_dest }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      when: (dpi_suricata_classification_dest | default('')) != (dpi_suricata_classification_src | default(''))
+  when: dpi_suricata_enable | bool
+
+- name: Install TuxedoVPN Suricata configuration (suricata.yaml)
+  vars:
+    _dpi_suricata_yaml_base: "{{ lookup('ansible.builtin.file', role_path ~ '/files/suricata.yaml') }}"
+    _dpi_suricata_home_net_value: "{{ (dpi_suricata_home_nets_effective | default([])) | join(',') }}"
+    _dpi_suricata_home_net_line: 'HOME_NET: "[{{ _dpi_suricata_home_net_value }}]"'
+  ansible.builtin.copy:
+    dest: "{{ dpi_suricata_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+    content: >-
+      {{
+        (
+          (
+            _dpi_suricata_yaml_base
+            | regex_replace('(?m)^\\s*queue:\\s*\\d+\\s*$', '  queue: ' ~ (dpi_suricata_queue_num_effective | string))
+            | regex_replace('(?m)^\\s*HOME_NET:.*$', '    ' ~ _dpi_suricata_home_net_line)
+          )
+          if (_dpi_suricata_home_net_value | length) > 0
+          else (
+            _dpi_suricata_yaml_base
+            | regex_replace('(?m)^\\s*queue:\\s*\\d+\\s*$', '  queue: ' ~ (dpi_suricata_queue_num_effective | string))
+          )
+        )
+      }}
+    validate: "{{ '/usr/bin/suricata -T -c %s' if (dpi_suricata_validate_config | default(true) | bool) else omit }}"
+  notify: Restart tuxedovpn Suricata (NFQUEUE)
+
+- name: Install tuxedovpn Suricata systemd unit (NFQUEUE capture)
+  ansible.builtin.template:
+    src: tuxedovpn-suricata.service.j2
+    dest: /etc/systemd/system/tuxedovpn-suricata.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart tuxedovpn Suricata (NFQUEUE)
+
+- name: Ensure tuxedovpn Suricata service is enabled and running
+  ansible.builtin.systemd:
+    name: tuxedovpn-suricata.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: dpi_suricata_enable | bool
+
+- name: Load mgmt webhook token from management host (vpn nodes)
+  when:
+    - dpi_agent_enable | bool
+    - (dpi_mgmt_webhook_url | default('') | trim | length) > 0
+  block:
+    - name: Determine management host for DPI webhook
+      ansible.builtin.set_fact:
+        _dpi_mgmt_host: "{{ groups['mgmt'] | first | default('') }}"
+      changed_when: false
+
+    - name: Ensure management host exists in inventory
+      ansible.builtin.assert:
+        that:
+          - (_dpi_mgmt_host | default('') | trim | length) > 0
+        fail_msg: "No mgmt host found in inventory group 'mgmt' (required for DPI webhook token retrieval)."
+
+    - name: Slurp DPI webhook token from management host when not provided
+      ansible.builtin.slurp:
+        path: "{{ dpi_mgmt_webhook_token_path }}"
+      delegate_to: "{{ _dpi_mgmt_host }}"
+      register: _dpi_mgmt_token_slurp_vpn
+      when: (dpi_mgmt_webhook_token | default('') | trim | length) == 0
+      no_log: true
+
+    - name: Set effective DPI webhook token fact (vpn)
+      ansible.builtin.set_fact:
+        dpi_mgmt_webhook_token_effective: >-
+          {{
+            (dpi_mgmt_webhook_token | trim)
+            if (dpi_mgmt_webhook_token | default('') | trim | length) > 0
+            else ((_dpi_mgmt_token_slurp_vpn.content | b64decode | trim) if (_dpi_mgmt_token_slurp_vpn is defined and _dpi_mgmt_token_slurp_vpn.content is defined) else '')
+          }}
+      no_log: true
+
+    - name: Ensure effective DPI webhook token is available (vpn)
+      ansible.builtin.assert:
+        that:
+          - (dpi_mgmt_webhook_token_effective | default('') | trim | length) > 0
+        fail_msg: >-
+          Unable to determine dpi_mgmt_webhook_token_effective on {{ inventory_hostname }}.
+          Ensure the mgmt play ran first to create {{ dpi_mgmt_webhook_token_path }} or set vault_dpi_webhook_token.
+      no_log: true
+
+- name: Install tuxedovpn DPI agent script
+  ansible.builtin.template:
+    src: tuxedovpn-dpi-agent.py.j2
+    dest: /usr/local/bin/tuxedovpn-dpi-agent.py
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart tuxedovpn DPI agent
+  when: dpi_agent_enable | bool
+
+- name: Install tuxedovpn DPI agent systemd unit
+  ansible.builtin.template:
+    src: tuxedovpn-dpi-agent.service.j2
+    dest: /etc/systemd/system/tuxedovpn-dpi-agent.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart tuxedovpn DPI agent
+  when: dpi_agent_enable | bool
+
+- name: Ensure tuxedovpn DPI agent service is enabled and running
+  ansible.builtin.systemd:
+    name: tuxedovpn-dpi-agent.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: dpi_agent_enable | bool
+
+- name: Run DPI self-tests (post-deploy)
+  ansible.builtin.import_tasks: selftest.yml
+  when: dpi_selftest_enable | default(true) | bool

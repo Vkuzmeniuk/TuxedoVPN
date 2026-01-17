@@ -1,0 +1,14 @@
+[Unit]
+Description=TuxedoVPN RADIUS → Pi-hole group sync
+After=network-online.target postgresql.service pihole-FTL.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/tuxedovpn/radius-pihole-sync.env
+ExecStart=/usr/bin/env python3 /usr/local/bin/tuxedovpn-radius-pihole-sync.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

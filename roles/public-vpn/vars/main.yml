@@ -1,0 +1,1 @@
+common_vpn_template_src: "{{ playbook_dir }}/roles/public-vpn/templates/ocserv.conf.j2"

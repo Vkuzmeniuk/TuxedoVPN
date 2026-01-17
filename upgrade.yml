@@ -1,0 +1,51 @@
+---
+- name: Prepare Ubuntu Distribution for Upgrade
+  hosts: vpn
+  become: true
+  gather_facts: yes
+  tasks:
+    - name: Update package manager cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_facts['distribution_version'] is version('24.04', '<')
+
+    - name: Perform distribution upgrade
+      apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+      when: ansible_facts['distribution_version'] is version('24.04', '<')
+
+    - name: Install update manager
+      apt:
+        name: ubuntu-release-upgrader-core
+        state: present
+      when: ansible_facts['distribution_version'] is version('24.04', '<')
+
+    - name: Reboot machine
+      reboot:
+        msg: "Rebooting after Ubuntu upgrade"
+        reboot_timeout: 600
+      when: ansible_facts['distribution_version'] is version('24.04', '<')
+  
+  # I haven't found a better idempotent approach—so we run the upgrade for ~20 minutes, reboot, and ignore errors.
+    - name: Run do-release-upgrade silently and immediately reboot
+      shell: do-release-upgrade -f DistUpgradeViewNonInteractive && shutdown -r now
+      async: 1200
+      poll: 30
+      ignore_errors: yes
+      when: ansible_facts['distribution_version'] is version('24.04', '<')
+
+
+- name: Check up do-release-upgrade result
+  hosts: vpn
+  become: true
+  tasks:
+    - name: Check Ubuntu version
+      ansible.builtin.command: lsb_release -a
+      register: lsb_result
+
+    - name: Display Ubuntu version
+      ansible.builtin.debug:
+        msg: "{{ lsb_result.stdout_lines }}"

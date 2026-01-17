@@ -1,0 +1,27 @@
+---
+- name: Validate certbot_action
+  ansible.builtin.assert:
+    that:
+      - certbot_action in ["issue", "renew"]
+    fail_msg: "certbot_action must be 'issue' or 'renew'."
+
+- name: Install Certbot and prerequisites
+  ansible.builtin.include_tasks: install.yml
+
+- name: Install Certbot hooks (optional)
+  ansible.builtin.include_tasks: hook.yml
+  when: >-
+    (certbot_deploy_hook_enable | bool)
+    or (
+      (certbot_method | default('')) == "standalone"
+      and (certbot_standalone_install_renew_hooks | default(true) | bool)
+      and ((certbot_standalone_stop_services | default([])) | length > 0)
+    )
+
+- name: Issue a certificate (certonly)
+  ansible.builtin.include_tasks: issue.yml
+  when: certbot_action == "issue"
+
+- name: Renew certificates
+  ansible.builtin.include_tasks: renew.yml
+  when: certbot_action == "renew"

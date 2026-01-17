@@ -1,0 +1,398 @@
+---
+- name: Disable dnsmasq service
+  ansible.builtin.service:
+    name: dnsmasq
+    state: stopped
+    enabled: false
+  when: ansible_facts['distribution_version'] is version('24.04', '==')
+  tags: ['pihole']
+
+- name: Check if pihole command is present
+  ansible.builtin.stat:
+    path: /usr/local/bin/pihole
+  register: pihole_service_check
+  tags: ['pihole']
+
+- name: Check for /etc/pihole/pihole.toml
+  ansible.builtin.stat:
+    path: /etc/pihole/pihole.toml
+  register: pihole_file_check
+  tags: ['pihole']
+
+- name: Determine Pi-hole interface (auto)
+  ansible.builtin.set_fact:
+    pihole_interface_effective: >-
+      {{
+        (pihole_interface | default('') | trim)
+        if (pihole_interface | default('') | trim | length) > 0
+        else (ansible_default_ipv4.interface | default('') | trim)
+      }}
+  changed_when: false
+  tags: ['pihole']
+
+- name: Ensure /etc/pihole directory exists (pre-install)
+  ansible.builtin.file:
+    path: /etc/pihole
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when:
+    - not pihole_service_check.stat.exists
+    - not pihole_file_check.stat.exists
+  become: true
+  tags: ['pihole']
+
+- name: Render Pi-hole setupVars.conf (pre-install)
+  ansible.builtin.template:
+    src: setupVars.conf.j2
+    dest: /etc/pihole/setupVars.conf
+    owner: root
+    group: root
+    mode: '0644'
+    backup: true
+  vars:
+    pihole_interface_effective: "{{ pihole_interface_effective }}"
+  when:
+    - not pihole_service_check.stat.exists
+    - not pihole_file_check.stat.exists
+  become: true
+  tags: ['pihole']
+
+- name: Run Pi-hole unattended installer
+  block:
+  - name: Download Pi-hole installer script
+    ansible.builtin.get_url:
+      url: "https://install.pi-hole.net"
+      dest: "/tmp/pihole-install.sh"
+      mode: "0755"
+
+  - name: Run Pi-hole installer (unattended)
+    ansible.builtin.command: bash /tmp/pihole-install.sh --unattended
+    register: pihole_installer
+    changed_when: true
+
+  - name: Update gravity (pihole -g)
+    ansible.builtin.command: pihole -g
+    changed_when: true
+
+  - name: Set Pi-hole admin password
+    ansible.builtin.command: pihole setpassword "{{ pihole_admin_password }}"
+    register: pi_hole_admin_password_set
+    changed_when: false
+    no_log: true
+
+  when:
+  - not pihole_service_check.stat.exists
+  - not pihole_file_check.stat.exists
+  tags: ['pihole']
+  become: true
+
+- name: Ensure Pi-hole admin password is set
+  ansible.builtin.command: pihole setpassword "{{ pihole_admin_password }}"
+  when:
+    - pihole_admin_password is defined
+    - pihole_service_check.stat.exists or pihole_file_check.stat.exists
+  changed_when: false
+  no_log: true
+  become: true
+  tags: ['pihole']
+
+- name: Ensure Pi-hole listens on all interfaces (setupVars.conf)
+  ansible.builtin.lineinfile:
+    path: /etc/pihole/setupVars.conf
+    regexp: '^DNSMASQ_LISTENING='
+    line: 'DNSMASQ_LISTENING=all'
+    create: yes
+  notify: Restart Pi-hole service
+  become: true
+  tags: ['pihole', 'dns-network']
+
+- name: Ensure Pi-hole listens on all interfaces (pihole.toml)
+  ansible.builtin.lineinfile:
+    path: /etc/pihole/pihole.toml
+    regexp: '^listeningMode ='
+    line: 'listeningMode = "ALL"'
+    create: yes
+  notify: Restart Pi-hole service
+  become: true
+  tags: ['pihole', 'dns-network']
+
+- name: Allow Pi-hole to answer DNS queries from routed VPN subnets (permit all origins)
+  ansible.builtin.copy:
+    dest: "{{ pihole_dns_permit_all_origins_conf_path }}"
+    content: |
+      # Managed by Ansible (pihole)
+      # Required when VPN client subnets are routed (not directly connected) and
+      # Pi-hole runs in "Allow only local requests" mode (dnsmasq local-service).
+      # Security is enforced by source-based UFW allowlist rules.
+      except-interface=nonexisting
+    owner: root
+    group: root
+    mode: '0644'
+  when: pihole_dns_permit_all_origins | bool
+  notify: Restart Pi-hole service
+  become: true
+  tags: ['pihole', 'dns-network']
+
+- name: Disable permit-all-origins override when not requested
+  ansible.builtin.file:
+    path: "{{ pihole_dns_permit_all_origins_conf_path }}"
+    state: absent
+  when: not (pihole_dns_permit_all_origins | bool)
+  notify: Restart Pi-hole service
+  become: true
+  tags: ['pihole', 'dns-network']
+
+- name: Restrict Pi-hole Web UI access through UFW
+  vars:
+    pihole_webui_allowed_sources_effective: "{{ pihole_webui_allowed_sources | default([]) }}"
+  block:
+    - name: Remove broad Pi-hole Web UI allow rule (HTTP)
+      community.general.ufw:
+        rule: allow
+        port: "{{ http_pihole_port }}"
+        proto: tcp
+        direction: in
+        delete: true
+      when: (pihole_webui_allowed_sources_effective | length) > 0
+
+    - name: Remove broad Pi-hole Web UI allow rule (HTTPS)
+      community.general.ufw:
+        rule: allow
+        port: "{{ https_pihole_port }}"
+        proto: tcp
+        direction: in
+        delete: true
+      when: (pihole_webui_allowed_sources_effective | length) > 0
+
+    - name: Allow Pi-hole Web UI HTTP from allowed sources
+      community.general.ufw:
+        rule: allow
+        port: "{{ http_pihole_port }}"
+        proto: tcp
+        src: "{{ item }}"
+      loop: "{{ pihole_webui_allowed_sources_effective }}"
+      when: (pihole_webui_allowed_sources_effective | length) > 0
+
+    - name: Allow Pi-hole Web UI HTTPS from allowed sources
+      community.general.ufw:
+        rule: allow
+        port: "{{ https_pihole_port }}"
+        proto: tcp
+        src: "{{ item }}"
+      loop: "{{ pihole_webui_allowed_sources_effective }}"
+      when: (pihole_webui_allowed_sources_effective | length) > 0
+
+    - name: Allow Pi-hole Web UI from anywhere (legacy default)
+      when: (pihole_webui_allowed_sources_effective | length) == 0
+      block:
+        - name: Allow incoming HTTP traffic
+          community.general.ufw:
+            rule: allow
+            port: "{{ http_pihole_port }}"
+            proto: tcp
+
+        - name: Allow incoming HTTPS traffic
+          community.general.ufw:
+            rule: allow
+            port: "{{ https_pihole_port }}"
+            proto: tcp
+  become: true
+  tags: ['pihole', 'ufw']
+
+- name: Allow DNS traffic through UFW
+  vars:
+    pihole_dns_allowed_sources_effective: >-
+      {{
+        (pihole_dns_allowed_sources | default([]))
+        if (pihole_dns_allowed_sources | default([]) | length > 0)
+        else (
+          groups['vpn'] | default([])
+          | map('extract', hostvars, 'ansible_host')
+          | select('defined')
+          | list
+          | map('regex_replace', '$', '/32')
+          | list
+        )
+      }}
+    pihole_dns_wireguard_only_sources_effective: "{{ pihole_dns_wireguard_only_sources | default([]) }}"
+    pihole_dns_plain_sources_effective: >-
+      {{
+        (pihole_dns_allowed_sources_effective | default([]))
+        | difference(pihole_dns_wireguard_only_sources_effective | default([]))
+      }}
+  block:
+
+  - name: Remove broad DNS allow rule on port 53 (TCP)
+    community.general.ufw:
+      rule: allow
+      port: "{{ udp_dns_port }}"
+      proto: tcp
+      direction: in
+      delete: true
+    when: (pihole_dns_allowed_sources_effective | length) > 0
+
+  - name: Remove broad DNS allow rule on port 53 (UDP)
+    community.general.ufw:
+      rule: allow
+      port: "{{ udp_dns_port }}"
+      proto: udp
+      direction: in
+      delete: true
+    when: (pihole_dns_allowed_sources_effective | length) > 0
+
+  - name: Remove legacy DNS allow rules (TCP) without interface for WireGuard-only sources
+    community.general.ufw:
+      rule: allow
+      port: "{{ udp_dns_port }}"
+      proto: tcp
+      direction: in
+      src: "{{ item }}"
+      delete: true
+    loop: "{{ pihole_dns_wireguard_only_sources_effective }}"
+    when: (pihole_dns_wireguard_only_sources_effective | default([]) | length) > 0
+
+  - name: Remove legacy DNS allow rules (UDP) without interface for WireGuard-only sources
+    community.general.ufw:
+      rule: allow
+      port: "{{ udp_dns_port }}"
+      proto: udp
+      direction: in
+      src: "{{ item }}"
+      delete: true
+    loop: "{{ pihole_dns_wireguard_only_sources_effective }}"
+    when: (pihole_dns_wireguard_only_sources_effective | default([]) | length) > 0
+
+  - name: Allow incoming DNS traffic on port 53 TCP from plain sources
+    community.general.ufw:
+      rule: allow
+      port: "{{ udp_dns_port }}"
+      proto: tcp
+      direction: in
+      src: "{{ item }}"
+    loop: "{{ pihole_dns_plain_sources_effective }}"
+    when: (pihole_dns_plain_sources_effective | default([]) | length) > 0
+
+  - name: Allow incoming DNS traffic on port 53 UDP from plain sources
+    community.general.ufw:
+      rule: allow
+      port: "{{ udp_dns_port }}"
+      proto: udp
+      direction: in
+      src: "{{ item }}"
+    loop: "{{ pihole_dns_plain_sources_effective }}"
+    when: (pihole_dns_plain_sources_effective | default([]) | length) > 0
+
+  - name: Allow incoming DNS traffic on port 53 TCP via WireGuard only
+    community.general.ufw:
+      rule: allow
+      port: "{{ udp_dns_port }}"
+      proto: tcp
+      direction: in
+      interface: "{{ mgmt_wireguard_interface }}"
+      src: "{{ item }}"
+    loop: "{{ pihole_dns_wireguard_only_sources_effective }}"
+    when: (pihole_dns_wireguard_only_sources_effective | default([]) | length) > 0
+
+  - name: Allow incoming DNS traffic on port 53 UDP via WireGuard only
+    community.general.ufw:
+      rule: allow
+      port: "{{ udp_dns_port }}"
+      proto: udp
+      direction: in
+      interface: "{{ mgmt_wireguard_interface }}"
+      src: "{{ item }}"
+    loop: "{{ pihole_dns_wireguard_only_sources_effective }}"
+    when: (pihole_dns_wireguard_only_sources_effective | default([]) | length) > 0
+  become: true
+  tags: ['pihole', 'ufw', 'dns-network']
+
+- name: Ensure Pi-hole has friendly hostnames for infrastructure clients
+  vars:
+    pihole_infra_hosts: "{{ ((groups['vpn'] | default([])) + (groups['mgmt'] | default([]))) | unique }}"
+  ansible.builtin.blockinfile:
+    path: /etc/pihole/custom.list
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+    marker: "# {mark} ANSIBLE INFRA HOSTS"
+    block: |
+      {% for host in pihole_infra_hosts %}
+      {% set ip = (hostvars[host].ansible_host | default('')) %}
+      {% if ip | trim | length > 0 %}
+      {{ ip }} {{ host }} {{ host }}.local
+      {% endif %}
+      {% endfor %}
+  notify: Restart Pi-hole service
+  become: true
+  tags: ['pihole']
+
+- name: Ensure Pi-hole resolves mgmt service domains to the mgmt VPN gateway IP
+  vars:
+    pihole_mgmt_service_ip: "{{ mgmt_reverse_proxy_bind_ip | default(vpn_dns_client_ip | default('')) }}"
+    pihole_mgmt_service_domains: >-
+      {{
+        [
+          (grafana_domain | default('')),
+          (prometheus_domain | default('')),
+          (pihole_domain | default(''))
+        ]
+        | map('regex_replace', '^\\s+|\\s+$', '')
+        | reject('equalto', '')
+        | list
+        | unique
+      }}
+  ansible.builtin.blockinfile:
+    path: /etc/pihole/custom.list
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+    marker: "# {mark} ANSIBLE MGMT SERVICE DOMAINS"
+    block: |
+      {% for domain in pihole_mgmt_service_domains %}
+      {{ pihole_mgmt_service_ip }} {{ domain }}
+      {% endfor %}
+  when:
+    - (pihole_mgmt_service_ip | string | trim) | length > 0
+    - (pihole_mgmt_service_domains | length) > 0
+  notify: Restart Pi-hole service
+  become: true
+  tags: ['pihole']
+
+- name: Ensure [misc] section exists in pihole.toml
+  ansible.builtin.lineinfile:
+    path: /etc/pihole/pihole.toml
+    line: "[misc]"
+    regexp: '^\[misc\]$'
+    insertbefore: BOF
+    create: true
+  when: pihole_service_check.stat.exists
+  become: true
+  tags: ['pihole', 'dns-network']
+
+- name: Enable etc_dnsmasq_d in pihole.toml (Pi-hole v6)
+  ansible.builtin.lineinfile:
+    path: /etc/pihole/pihole.toml
+    regexp: '^\s*etc_dnsmasq_d\s*='
+    line: 'etc_dnsmasq_d = true'
+    insertafter: '^\[misc\]$'
+    create: true
+  when: pihole_service_check.stat.exists
+  notify: Restart Pi-hole service
+  become: true
+  tags: ['pihole', 'dns-network']
+
+- name: Deploy dnsmasq config to load custom.list
+  ansible.builtin.template:
+    src: 02-custom-list.conf.j2
+    dest: /etc/dnsmasq.d/02-custom-list.conf
+    owner: root
+    group: root
+    mode: '0644'
+  when: pihole_service_check.stat.exists
+  notify: Restart Pi-hole service
+  become: true
+  tags: ['pihole', 'dns-network']

@@ -1,0 +1,500 @@
+---
+# Install WireGuard tools, generate keys, render configuration and manage
+# the wg-quick service for the management WireGuard tunnel.
+
+- name: Check whether wg binary is present
+  ansible.builtin.stat:
+    path: /usr/bin/wg
+  register: mgmt_wireguard_wg_stat
+  changed_when: false
+
+- name: Ensure wireguard tools are installed (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: wireguard-tools
+    state: present
+    update_cache: false
+    lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
+  when:
+    - ansible_facts.os_family == "Debian"
+    - not (mgmt_wireguard_wg_stat.stat.exists | default(false))
+
+- name: Ensure wireguard tools are installed (generic)
+  ansible.builtin.package:
+    name: wireguard-tools
+    state: present
+  when:
+    - ansible_facts.os_family != "Debian"
+    - not (mgmt_wireguard_wg_stat.stat.exists | default(false))
+
+- name: Validate mgmt WireGuard address definition
+  ansible.builtin.assert:
+    that:
+      - (mgmt_wireguard_address_mgmt | default('') | trim) | length > 0
+      - (mgmt_wireguard_address_mgmt | default('')) is search('/\\d+$')
+    fail_msg: "mgmt_wireguard_address_mgmt must be set to an address with a CIDR prefix (e.g. 10.202.0.1/24)."
+
+- name: Derive WireGuard network helpers
+  ansible.builtin.set_fact:
+    mgmt_wireguard_network_prefix_length: "{{ (mgmt_wireguard_address_mgmt.split('/') | last) | int }}"
+    mgmt_wireguard_mgmt_ip: "{{ (mgmt_wireguard_address_mgmt | regex_replace('/.*$', '')) | trim }}"
+    mgmt_wireguard_ipv4_base_prefix: "{{ (mgmt_wireguard_address_mgmt | regex_replace('/.*$', '') | regex_replace('\\.\\d+$', '.')) | trim }}"
+  changed_when: false
+
+- name: Validate auto assignment prerequisites
+  ansible.builtin.assert:
+    that:
+      - mgmt_wireguard_network_prefix_length == 24
+      - (mgmt_wireguard_ipv4_base_prefix | default('')) is search('^\\d+\\.\\d+\\.\\d+\\.$')
+    fail_msg: >-
+      Auto-assigned VPN WireGuard addresses require `mgmt_wireguard_address_mgmt` to be an IPv4 /24
+      (e.g. 10.202.0.1/24). Either adjust mgmt_wireguard_address_mgmt or set per-host
+      `mgmt_wireguard_wireguard_address` in host_vars.
+  when:
+    - (mgmt_wireguard_auto_assign_vpn_addresses | default(true) | bool)
+    - (mgmt_wireguard_vpn_hosts | default([]) | length) > 1
+
+- name: Compute auto-assigned VPN WireGuard address for this host (when needed)
+  ansible.builtin.set_fact:
+    mgmt_wireguard_auto_vpn_address: >-
+      {{
+        mgmt_wireguard_ipv4_base_prefix
+        ~ (((mgmt_wireguard_vpn_ip_start | default(2) | int) + (mgmt_wireguard_vpn_hosts.index(inventory_hostname) | int)) | string)
+        ~ '/'
+        ~ (mgmt_wireguard_network_prefix_length | string)
+      }}
+  when:
+    - (mgmt_wireguard_vpn_group in group_names)
+    - (mgmt_wireguard_auto_assign_vpn_addresses | default(true) | bool)
+    - (mgmt_wireguard_wireguard_address | default('') | trim | length) == 0
+    - (mgmt_wireguard_address_vpn | default('') | trim | length) == 0
+  changed_when: false
+
+- name: Set effective WireGuard address for this host
+  ansible.builtin.set_fact:
+    mgmt_wireguard_wireguard_address_effective: >-
+      {{
+        mgmt_wireguard_wireguard_address
+        | default(
+            mgmt_wireguard_address_mgmt
+            if (mgmt_wireguard_mgmt_group in group_names)
+            else (
+              mgmt_wireguard_address_vpn
+              if ((mgmt_wireguard_address_vpn | default('') | trim | length) > 0) and ((mgmt_wireguard_vpn_hosts | length) == 1)
+              else (mgmt_wireguard_auto_vpn_address | default(''))
+            )
+          )
+      }}
+
+- name: Validate effective WireGuard address was resolved
+  ansible.builtin.assert:
+    that:
+      - (mgmt_wireguard_wireguard_address_effective | default('') | trim) | length > 0
+    fail_msg: >-
+      Unable to determine WireGuard address for {{ inventory_hostname }}.
+      Set `mgmt_wireguard_wireguard_address` in host_vars for this host, or enable auto assignment
+      via `mgmt_wireguard_auto_assign_vpn_addresses=true` and `mgmt_wireguard_address_mgmt` in group_vars.
+
+- name: Derive WireGuard IP for this host
+  ansible.builtin.set_fact:
+    mgmt_wireguard_wireguard_ip: "{{ (mgmt_wireguard_wireguard_address_effective | regex_replace('/.*$', '')) | trim }}"
+
+- name: Ensure /etc/wireguard exists
+  ansible.builtin.file:
+    path: /etc/wireguard
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+
+- name: Generate WireGuard private key when missing
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    wg genkey > {{ mgmt_wireguard_private_key_path }}
+  args:
+    executable: /bin/bash
+    creates: "{{ mgmt_wireguard_private_key_path }}"
+  become: true
+  no_log: true
+
+- name: Generate WireGuard public key when missing
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    wg pubkey < {{ mgmt_wireguard_private_key_path }} > {{ mgmt_wireguard_public_key_path }}
+  args:
+    executable: /bin/bash
+    creates: "{{ mgmt_wireguard_public_key_path }}"
+  become: true
+  no_log: true
+
+- name: Read WireGuard public key
+  ansible.builtin.slurp:
+    path: "{{ mgmt_wireguard_public_key_path }}"
+  register: mgmt_wireguard_wg_pub_slurp
+  changed_when: false
+  become: true
+  no_log: true
+
+- name: Publish WireGuard public key as host fact
+  ansible.builtin.set_fact:
+    mgmt_wireguard_wireguard_public_key: "{{ (mgmt_wireguard_wg_pub_slurp.content | b64decode | trim) }}"
+  no_log: true
+
+- name: Read WireGuard private key for config rendering
+  ansible.builtin.slurp:
+    path: "{{ mgmt_wireguard_private_key_path }}"
+  register: mgmt_wireguard_wg_priv_slurp
+  changed_when: false
+  become: true
+  no_log: true
+
+- name: Publish WireGuard private key for config rendering
+  ansible.builtin.set_fact:
+    mgmt_wireguard_wireguard_private_key: "{{ (mgmt_wireguard_wg_priv_slurp.content | b64decode | trim) }}"
+  no_log: true
+
+- name: Ensure WireGuard private key is available for config rendering
+  ansible.builtin.assert:
+    that:
+      - mgmt_wireguard_wireguard_private_key is defined
+      - (mgmt_wireguard_wireguard_private_key | default('') | trim) | length > 0
+    fail_msg: "WireGuard private key is not available for {{ inventory_hostname }}; key generation or slurp likely failed earlier."
+
+- name: Ensure peer facts exist before rendering config (mgmt)
+  when: mgmt_wireguard_mgmt_group in group_names
+  block:
+    - name: Ensure at least one VPN peer is present in this play
+      ansible.builtin.assert:
+        that:
+          - (mgmt_wireguard_vpn_data | default([])) | length > 0
+        fail_msg: >-
+          No VPN peers were detected for mgmt-wireguard in this play.
+          Ensure you run the play against both `mgmt` and `vpn` groups.
+
+    - name: Read VPN peer public keys from their hosts (authoritative)
+      ansible.builtin.slurp:
+        path: "/etc/wireguard/{{ mgmt_wireguard_interface }}.pub"
+      delegate_to: "{{ item.name }}"
+      register: mgmt_wireguard_peer_pubkeys_slurp
+      loop: "{{ mgmt_wireguard_vpn_data }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+
+    - name: Build VPN peer public key map (mgmt)
+      ansible.builtin.set_fact:
+        mgmt_wireguard_peer_pubkey_map: >-
+          {{
+            (mgmt_wireguard_peer_pubkey_map | default({}))
+            | combine({
+                item.item.name: ((item.content | b64decode | trim) if (item.content is defined) else '')
+              })
+          }}
+      loop: "{{ mgmt_wireguard_peer_pubkeys_slurp.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name | default('UNKNOWN') }}"
+      no_log: true
+
+    - name: Build WireGuard peer list for template rendering (mgmt)
+      ansible.builtin.set_fact:
+        mgmt_wireguard_vpn_peers: "{{ (mgmt_wireguard_vpn_peers | default([])) + [ _peer_rec ] }}"
+      vars:
+        _peer_ip_from_hostvar: "{{ (hostvars[item.name].mgmt_wireguard_wireguard_address | default('') | regex_replace('/.*$', '') | trim) }}"
+        _peer_ip_auto: >-
+          {{
+            mgmt_wireguard_ipv4_base_prefix
+            ~ (((mgmt_wireguard_vpn_ip_start | default(2) | int) + (mgmt_wireguard_vpn_hosts.index(item.name) | int)) | string)
+          }}
+        _peer_ip: >-
+          {{
+            _peer_ip_from_hostvar
+            if (_peer_ip_from_hostvar | length) > 0
+            else (
+              (mgmt_wireguard_address_vpn | regex_replace('/.*$', '') | trim)
+              if ((mgmt_wireguard_address_vpn | default('') | trim | length) > 0) and ((mgmt_wireguard_vpn_hosts | length) == 1)
+              else _peer_ip_auto
+            )
+          }}
+        _peer_pubkey: "{{ (mgmt_wireguard_peer_pubkey_map[item.name] | default('') | trim) }}"
+        _peer_rec:
+          name: "{{ item.name }}"
+          ansible_host: "{{ item.ansible_host }}"
+          network: "{{ item.network }}"
+          prefix_length: "{{ item.prefix_length | int }}"
+          wg_ip: "{{ _peer_ip }}"
+          public_key: "{{ _peer_pubkey }}"
+      loop: "{{ mgmt_wireguard_vpn_data }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Validate WireGuard peer list for template rendering (mgmt)
+      ansible.builtin.assert:
+        that:
+          - (mgmt_wireguard_vpn_peers | default([])) | length == (mgmt_wireguard_vpn_data | default([]) | length)
+          - (mgmt_wireguard_vpn_peers | selectattr('public_key', 'defined') | list | length) == (mgmt_wireguard_vpn_peers | length)
+          - (mgmt_wireguard_vpn_peers | map(attribute='public_key') | map('trim') | select('match', '^\\S+$') | list | length) == (mgmt_wireguard_vpn_peers | length)
+          - (mgmt_wireguard_vpn_peers | map(attribute='wg_ip') | map('trim') | select('match', '^\\d+\\.\\d+\\.\\d+\\.\\d+$') | list | length) == (mgmt_wireguard_vpn_peers | length)
+        fail_msg: >-
+          Unable to build WireGuard peer list on {{ inventory_hostname }}.
+          Ensure VPN hosts are reachable and have /etc/wireguard/{{ mgmt_wireguard_interface }}.pub present.
+
+- name: Ensure management peer facts exist before rendering config (vpn)
+  when: mgmt_wireguard_vpn_group in group_names
+  block:
+    - name: Ensure management host is defined
+      ansible.builtin.assert:
+        that:
+          - mgmt_wireguard_mgmt_host | default('') | trim | length > 0
+        fail_msg: "Management host for mgmt-wireguard could not be determined (empty mgmt_wireguard_mgmt_host)."
+
+    - name: Read management public key from management host (authoritative)
+      ansible.builtin.slurp:
+        path: "/etc/wireguard/{{ mgmt_wireguard_interface }}.pub"
+      delegate_to: "{{ mgmt_wireguard_mgmt_host }}"
+      register: mgmt_wireguard_mgmt_pubkey_slurp
+      no_log: true
+
+    - name: Publish management public key fact for template rendering (vpn)
+      ansible.builtin.set_fact:
+        mgmt_wireguard_mgmt_public_key: "{{ (mgmt_wireguard_mgmt_pubkey_slurp.content | b64decode | trim) }}"
+      no_log: true
+
+    - name: Validate management public key for template rendering (vpn)
+      ansible.builtin.assert:
+        that:
+          - (mgmt_wireguard_mgmt_public_key | default('') | trim) | length > 0
+          - (mgmt_wireguard_mgmt_ip | default('') | trim) is match('^\\d+\\.\\d+\\.\\d+\\.\\d+$')
+        fail_msg: >-
+          Unable to load management WireGuard public key from {{ mgmt_wireguard_mgmt_host }}.
+          Ensure the management host is reachable and has /etc/wireguard/{{ mgmt_wireguard_interface }}.pub present.
+
+- name: Allow WireGuard UDP port on management host from VPN nodes
+  community.general.ufw:
+    rule: allow
+    port: "{{ mgmt_wireguard_port }}"
+    proto: udp
+    src: "{{ item.ansible_host }}"
+  loop: "{{ mgmt_wireguard_vpn_data }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: mgmt_wireguard_mgmt_group in group_names
+  become: true
+
+- name: Render WireGuard config for management tunnel
+  become: true
+  block:
+    - name: Render WireGuard config file
+      ansible.builtin.template:
+        src: wireguard.conf.j2
+        dest: "{{ mgmt_wireguard_config_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      register: mgmt_wireguard_conf
+      no_log: true
+  rescue:
+    - name: Show peer fact availability (sanitized)
+      when: mgmt_wireguard_mgmt_group in group_names
+      ansible.builtin.debug:
+        msg: >-
+          peer={{ item.name }}
+          vpn_pubkey_defined={{ hostvars[item.name].mgmt_wireguard_wireguard_public_key is defined }}
+          vpn_ip_defined={{ hostvars[item.name].mgmt_wireguard_wireguard_ip is defined }}
+      loop: "{{ mgmt_wireguard_vpn_data | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      failed_when: false
+
+    - name: Show current play hosts (sanitized)
+      ansible.builtin.debug:
+        msg: "ansible_play_hosts_all={{ ansible_play_hosts_all | default([]) }}"
+      failed_when: false
+
+    - name: Fail with a hint
+      ansible.builtin.fail:
+        msg: >-
+          WireGuard config rendering failed on {{ inventory_hostname }}.
+          Most commonly this happens when running with `-l mgmt` (VPN hosts are excluded so their keys are missing).
+          Re-run `ansible-playbook site.yml` (no limit) or include both `-l mgmt,vpn`.
+
+- name: Ensure WireGuard kernel module is available (best-effort)
+  ansible.builtin.command: modprobe wireguard
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Check whether WireGuard interface exists (pre-flight)
+  ansible.builtin.command: ip link show dev {{ mgmt_wireguard_interface }}
+  register: mgmt_wireguard_wg_link_precheck
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Decide whether WireGuard needs a restart
+  ansible.builtin.set_fact:
+    mgmt_wireguard_wg_restart_required: >-
+      {{
+        (mgmt_wireguard_conf.changed | default(false))
+        or ((mgmt_wireguard_wg_link_precheck.rc | default(1)) != 0)
+      }}
+  changed_when: false
+
+- name: Ensure wg-quick service is enabled
+  ansible.builtin.systemd:
+    name: "wg-quick@{{ mgmt_wireguard_interface }}"
+    enabled: true
+  changed_when: false
+  become: true
+
+- name: Check whether WireGuard UDP port is already in use (pre-flight, mgmt)
+  when: mgmt_wireguard_mgmt_group in group_names
+  become: true
+  block:
+    - name: Check UDP listeners for WireGuard port
+      ansible.builtin.shell: |
+        set -o pipefail
+        ss -H -lun | awk '$5 ~ /:{{ mgmt_wireguard_port | int }}$/ {print}'
+      args:
+        executable: /bin/bash
+      register: mgmt_wireguard_port_ss
+      changed_when: false
+      failed_when: false
+
+    - name: Check existing WireGuard interfaces using this listen port
+      ansible.builtin.shell: |
+        set -o pipefail
+        wg show all listen-port 2>/dev/null | awk '$2 == "{{ mgmt_wireguard_port | int }}" && $1 != "{{ mgmt_wireguard_interface }}" {print $1}' || true
+      args:
+        executable: /bin/bash
+      register: mgmt_wireguard_port_wg_ifaces
+      changed_when: false
+      failed_when: false
+
+    - name: Fail when WireGuard UDP port is already in use
+      ansible.builtin.fail:
+        msg: |-
+          UDP port {{ mgmt_wireguard_port }} is already in use on {{ inventory_hostname }}; wg-quick cannot bring {{ mgmt_wireguard_interface }} up.
+
+          ss listeners:
+          {{ (mgmt_wireguard_port_ss.stdout | default('') | trim) | default('NONE', true) }}
+
+          Other WireGuard interfaces using this port:
+          {{ (mgmt_wireguard_port_wg_ifaces.stdout | default('') | trim) | default('NONE', true) }}
+
+          Free the port (stop the conflicting service/interface) or override `mgmt_wireguard_port`.
+      when:
+        - (mgmt_wireguard_port_ss.stdout | default('') | trim) | length > 0
+
+- name: (Re)start WireGuard interface when required
+  when: mgmt_wireguard_wg_restart_required | default(false) | bool
+  become: true
+  block:
+    - name: Stop wg-quick service (best-effort)
+      ansible.builtin.command: systemctl stop wg-quick@{{ mgmt_wireguard_interface }}
+      changed_when: false
+      failed_when: false
+
+    - name: Remove stale WireGuard link (best-effort)
+      ansible.builtin.command: ip link del {{ mgmt_wireguard_interface }}
+      changed_when: false
+      failed_when: false
+
+    - name: Reset failed state for wg-quick service (best-effort)
+      ansible.builtin.command: systemctl reset-failed wg-quick@{{ mgmt_wireguard_interface }}
+      changed_when: false
+      failed_when: false
+
+    - name: Start WireGuard via systemd
+      ansible.builtin.systemd:
+        name: "wg-quick@{{ mgmt_wireguard_interface }}"
+        state: started
+  rescue:
+    - name: Capture wg-quick service status for debugging
+      ansible.builtin.command: systemctl --no-pager --full status wg-quick@{{ mgmt_wireguard_interface }}
+      register: mgmt_wireguard_wg_status
+      changed_when: false
+      failed_when: false
+
+    - name: Capture wg-quick journal logs for debugging
+      ansible.builtin.command: journalctl --no-pager -u wg-quick@{{ mgmt_wireguard_interface }} -n 120
+      register: mgmt_wireguard_wg_journal
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with wg-quick troubleshooting hint
+      ansible.builtin.fail:
+        msg: >-
+          Failed to start wg-quick@{{ mgmt_wireguard_interface }}.
+          systemctl status:
+          {{ mgmt_wireguard_wg_status.stdout | default('') | trim }}
+          journalctl:
+          {{ mgmt_wireguard_wg_journal.stdout | default('') | trim }}
+
+- name: Ensure WireGuard interface is started (no-op when already healthy)
+  ansible.builtin.systemd:
+    name: "wg-quick@{{ mgmt_wireguard_interface }}"
+    state: started
+  become: true
+
+- name: Wait briefly for WireGuard interface to appear
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for _ in 1 2 3 4 5; do
+      if ip link show dev {{ mgmt_wireguard_interface }} >/dev/null 2>&1; then
+        exit 0
+      fi
+      sleep 1
+    done
+    ip link show dev {{ mgmt_wireguard_interface }}
+  args:
+    executable: /bin/bash
+  register: mgmt_wireguard_wg_link_check
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Fail when WireGuard interface is missing
+  when:
+    - mgmt_wireguard_wg_link_check.rc | default(1) != 0
+  become: true
+  block:
+    - name: Capture wg-quick service status for debugging (missing interface)
+      ansible.builtin.command: systemctl --no-pager --full status wg-quick@{{ mgmt_wireguard_interface }}
+      register: mgmt_wireguard_wg_status_missing
+      changed_when: false
+      failed_when: false
+
+    - name: Capture wg-quick journal logs for debugging (missing interface)
+      ansible.builtin.command: journalctl --no-pager -u wg-quick@{{ mgmt_wireguard_interface }} -n 120
+      register: mgmt_wireguard_wg_journal_missing
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with missing-interface troubleshooting hint
+      ansible.builtin.fail:
+        msg: >-
+          WireGuard interface {{ mgmt_wireguard_interface }} is missing after starting wg-quick.
+          systemctl status:
+          {{ mgmt_wireguard_wg_status_missing.stdout | default('') | trim }}
+          journalctl:
+          {{ mgmt_wireguard_wg_journal_missing.stdout | default('') | trim }}
+
+- name: Ensure management routes to VPN client subnets prefer WireGuard
+  ansible.builtin.command: ip route replace {{ item.network }}/{{ item.prefix_length }} dev {{ mgmt_wireguard_interface }}
+  loop: "{{ mgmt_wireguard_vpn_data }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: mgmt_wireguard_mgmt_group in group_names
+  changed_when: false
+  become: true
+
+- name: Ensure IP forwarding is enabled on VPN nodes
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_set: true
+    state: present
+  when: mgmt_wireguard_vpn_group in group_names
+  become: true

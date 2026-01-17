@@ -1,0 +1,41 @@
+# Managed by Ansible (role: common-vpn)
+#
+# RadSec proxy for ocserv/radcli:
+# - ocserv sends RADIUS (UDP) to localhost
+# - radsecproxy proxies RADIUS over TLS to FreeRADIUS (RadSec)
+#
+
+# Listen locally for Access-Request and Accounting-Request from ocserv/radcli.
+ListenUDP {{ vpn_radsecproxy_listen_ip }}:{{ vpn_radsecproxy_listen_auth_port }}
+ListenUDP {{ vpn_radsecproxy_listen_ip }}:{{ vpn_radsecproxy_listen_acct_port }}
+
+# TLS client profile for RadSec upstream connections.
+tls default {
+    CACertificateFile {{ vpn_radsecproxy_tls_ca_file }}
+    CertificateFile {{ vpn_radsecproxy_tls_cert_file }}
+    CertificateKeyFile {{ vpn_radsecproxy_tls_key_file }}
+}
+
+# Local RADIUS client (ocserv/radcli).
+client {{ vpn_radsecproxy_listen_ip }} {
+    type udp
+    secret {{ vpn_radsecproxy_local_secret }}
+}
+
+# Upstream RadSec server (FreeRADIUS).
+server mgmt_radsec {
+    type tls
+    host {{ vpn_radsecproxy_upstream_host }}
+    port {{ vpn_radsecproxy_upstream_port }}
+    secret {{ vpn_radsecproxy_local_secret }}
+    tls default
+{% if (vpn_radsecproxy_upstream_tls_server_name | default('') | trim) | length > 0 %}
+    ServerName {{ vpn_radsecproxy_upstream_tls_server_name | trim }}
+{% endif %}
+}
+
+# Route everything to the mgmt RadSec server.
+realm * {
+    server mgmt_radsec
+    accountingServer mgmt_radsec
+}

@@ -1,0 +1,35 @@
+[Unit]
+Description=TuxedoVPN DPI agent (Suricata watcher + ocserv disconnect + Prometheus exporter)
+After=network-online.target tuxedovpn-suricata.service ocserv.service
+Requires=tuxedovpn-suricata.service ocserv.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment="EVE_FILE=/var/log/suricata/eve.json"
+Environment="LISTEN_HOST={{ dpi_agent_listen_ip }}"
+Environment="LISTEN_PORT={{ dpi_agent_listen_port | int }}"
+Environment="METRICS_PATH={{ dpi_agent_metrics_path }}"
+Environment="SIGNATURE_MATCH_REGEX={{ dpi_agent_signature_match_regex | replace('\\', '\\\\') }}"
+Environment="MATCH_MODE={{ dpi_agent_match_mode | default('ruleset') }}"
+Environment="RULESET_PATH={{ dpi_agent_ruleset_path | default(dpi_suricata_rule_dest) }}"
+Environment="IGNORE_SIDS={{ (dpi_agent_ignore_sids | default([])) | join(',') }}"
+Environment="EVE_EVENT_TYPES={{ (dpi_agent_eve_event_types | default(['alert','drop','bittorrent_dht'])) | join(',') }}"
+Environment="BLOCK_SECONDS={{ dpi_agent_block_seconds | int }}"
+Environment="ENFORCE_POLL_SECONDS={{ dpi_agent_enforce_poll_seconds | int }}"
+Environment="ENFORCE_MIN_INTERVAL_SECONDS={{ dpi_agent_enforce_min_interval_seconds | int }}"
+Environment="IP_CORRELATION_SECONDS={{ dpi_agent_ip_correlation_seconds | int }}"
+Environment="DISCONNECT_COOLDOWN_SECONDS={{ dpi_agent_disconnect_cooldown_seconds | int }}"
+Environment="DETECT_DEDUP_SECONDS={{ dpi_agent_detect_dedup_seconds | default(dpi_agent_disconnect_cooldown_seconds) | int }}"
+Environment="ACTION_COOLDOWN_SECONDS={{ dpi_agent_action_cooldown_seconds | default(dpi_agent_disconnect_cooldown_seconds) | int }}"
+Environment="OCCTL_BIN={{ dpi_occtl_path }}"
+Environment="VPN_SUBNETS={{ (dpi_suricata_home_nets_effective | default([])) | join(',') }}"
+Environment="MGMT_WEBHOOK_URL={{ dpi_mgmt_webhook_url | default('') }}"
+Environment="MGMT_WEBHOOK_TOKEN={{ dpi_mgmt_webhook_token_effective | default(dpi_mgmt_webhook_token | default('')) }}"
+Environment="NODE_NAME={{ ansible_nodename | default(ansible_hostname) | default(inventory_hostname) }}"
+ExecStart=/usr/local/bin/tuxedovpn-dpi-agent.py
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

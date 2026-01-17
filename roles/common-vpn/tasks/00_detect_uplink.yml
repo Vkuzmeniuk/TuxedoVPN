@@ -1,0 +1,38 @@
+---
+# 1) Try to determine the interface via "ip route get 1.1.1.1"
+- name: Detect uplink iface via routing table
+  ansible.builtin.shell: |
+    set -o pipefail
+    ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if ($i=="dev"){print $(i+1); exit}}'
+  args:
+    executable: /bin/bash
+  register: _uplink_guess
+  changed_when: false
+  failed_when: false
+
+# 2) Fallback: ansible_default_ipv4.interface
+- name: Fallback to ansible_default_ipv4.interface when needed
+  ansible.builtin.set_fact:
+    _uplink_fallback: "{{ ansible_default_ipv4.interface | default('') }}"
+
+# 3) Final selection order:
+#    - use vpn_uplink_iface from inventory if set;
+#    - otherwise use _uplink_guess;
+#    - otherwise use _uplink_fallback;
+#    - as a last resort, use enp0s3 (adjust for your platform if needed, e.g. enx3).
+- name: Decide final uplink iface
+  ansible.builtin.set_fact:
+    vpn_uplink_iface: >-
+      {{
+        (vpn_uplink_iface
+         if (vpn_uplink_iface | default('') | trim | length) > 0 else
+         (_uplink_guess.stdout | trim
+          if (_uplink_guess.stdout | default('') | trim | length) > 0 else
+          (_uplink_fallback | trim
+           if (_uplink_fallback | default('') | trim | length) > 0 else
+           'enp0s3')))
+      }}
+
+- name: Show chosen uplink iface (debug)
+  ansible.builtin.debug:
+    msg: "Uplink interface: {{ vpn_uplink_iface }}"

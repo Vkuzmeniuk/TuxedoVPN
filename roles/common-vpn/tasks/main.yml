@@ -1,0 +1,419 @@
+---
+- name: Build VPN package list
+  ansible.builtin.set_fact:
+    _common_vpn_packages: >-
+      {{
+        ['ocserv', 'gnutls-bin']
+        + (
+            vpn_radius_packages | default([])
+          if vpn_auth_mode == 'radius'
+          else []
+          )
+        + (
+            ['openconnect']
+          if vpn_connection_test_enable | default(false) | bool
+          else []
+          )
+      }}
+
+- name: Check dpkg frontend lock holder (pre-flight)
+  ansible.builtin.shell: |
+    set -o pipefail
+    fuser /var/lib/dpkg/lock-frontend 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  register: _common_vpn_dpkg_lock_pids
+  changed_when: false
+  failed_when: false
+  when: ansible_pkg_mgr == 'apt'
+  tags: ['ocserv', 'install']
+
+- name: Repair interrupted dpkg transactions (pre-flight)
+  ansible.builtin.command: dpkg --configure -a
+  register: _common_vpn_dpkg_configure
+  changed_when: false
+  failed_when: >-
+    (_common_vpn_dpkg_configure.rc != 0)
+    and ('lock' not in ((_common_vpn_dpkg_configure.stderr | default('')) | lower))
+  # If another process holds the dpkg lock (for example unattended-upgrades), skip the pre-flight repair
+  # and let subsequent apt tasks wait via lock_timeout.
+  when:
+    - ansible_pkg_mgr == 'apt'
+    - (_common_vpn_dpkg_lock_pids.stdout | default('') | trim) | length == 0
+  tags: ['ocserv', 'install']
+
+- name: Ensure VPN packages are present
+  block:
+    - name: Install VPN packages (APT)
+      ansible.builtin.apt:
+        name: "{{ _common_vpn_packages }}"
+        state: present
+        update_cache: true
+        lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
+      when: ansible_pkg_mgr == 'apt'
+
+    - name: Install VPN packages (generic)
+      ansible.builtin.package:
+        name: "{{ _common_vpn_packages }}"
+        state: present
+      when: ansible_pkg_mgr != 'apt'
+  rescue:
+    - name: Check dpkg frontend lock holder (rescue)
+      ansible.builtin.shell: |
+        set -o pipefail
+        fuser /var/lib/dpkg/lock-frontend 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: _common_vpn_dpkg_lock_pids_rescue
+      changed_when: false
+      failed_when: false
+      when: ansible_pkg_mgr == 'apt'
+
+    - name: Repair interrupted dpkg transactions
+      ansible.builtin.command: dpkg --configure -a
+      register: _common_vpn_dpkg_configure_rescue
+      changed_when: false
+      failed_when: >-
+        (_common_vpn_dpkg_configure_rescue.rc != 0)
+        and ('lock' not in ((_common_vpn_dpkg_configure_rescue.stderr | default('')) | lower))
+      when:
+        - ansible_pkg_mgr == 'apt'
+        - (_common_vpn_dpkg_lock_pids_rescue.stdout | default('') | trim) | length == 0
+    - name: Install VPN packages (retry, APT)
+      ansible.builtin.apt:
+        name: "{{ _common_vpn_packages }}"
+        state: present
+        update_cache: true
+        lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
+      when: ansible_pkg_mgr == 'apt'
+
+    - name: Install VPN packages (retry, generic)
+      ansible.builtin.package:
+        name: "{{ _common_vpn_packages }}"
+        state: present
+      when: ansible_pkg_mgr != 'apt'
+  tags: ['ocserv', 'install']
+
+- name: Ensure config and certs directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /etc/ocserv
+    - /etc/ocserv/conf.d
+    - "{{ vpn_cert_selfsigned_dir }}"
+  tags: ['ocserv', 'config']
+
+- name: Generate self-signed cert (for tests) - key
+  ansible.builtin.command:
+    cmd: "certtool --generate-privkey --outfile {{ vpn_cert_selfsigned_dir }}/server-key.pem"
+    creates: "{{ vpn_cert_selfsigned_dir }}/server-key.pem"
+  when: not vpn_cert_use_existing
+  tags: ['ocserv', 'cert']
+
+- name: Generate self-signed cert (for tests) - cert
+  ansible.builtin.shell: |
+    cat > {{ vpn_cert_selfsigned_dir }}/server.tmpl <<'TMPL'
+    cn = "{{ vpn_domain | default(inventory_hostname, true) }}"
+    organization = "Private VPN"
+    serial = 1
+    expiration_days = 365
+    tls_www_server
+    encryption_key
+    signing_key
+    TMPL
+    certtool --generate-self-signed \
+      --load-privkey {{ vpn_cert_selfsigned_dir }}/server-key.pem \
+      --template {{ vpn_cert_selfsigned_dir }}/server.tmpl \
+      --outfile {{ vpn_cert_selfsigned_dir }}/server-cert.pem
+  args:
+    creates: "{{ vpn_cert_selfsigned_dir }}/server-cert.pem"
+  when: not vpn_cert_use_existing
+  tags: ['ocserv', 'cert']
+
+- name: Set cert paths (existing vs self-signed)
+  ansible.builtin.set_fact:
+    _ocserv_cert_fullchain: >-
+      {{ (vpn_cert_use_existing | bool)
+           | ternary(vpn_cert_fullchain, vpn_cert_selfsigned_dir ~ '/server-cert.pem') }}
+    _ocserv_cert_key: >-
+      {{ (vpn_cert_use_existing | bool)
+           | ternary(vpn_cert_key,       vpn_cert_selfsigned_dir ~ '/server-key.pem') }}
+
+- name: Check existing TLS certificate files (when enabled)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _common_vpn_existing_cert_stat
+  loop:
+    - "{{ vpn_cert_fullchain }}"
+    - "{{ vpn_cert_key }}"
+  when: vpn_cert_use_existing | bool
+  changed_when: false
+
+- name: Compute list of missing TLS certificate files
+  ansible.builtin.set_fact:
+    _common_vpn_missing_cert_files: >-
+      {{
+        (_common_vpn_existing_cert_stat.results | default([]))
+        | rejectattr('stat.exists', 'equalto', true)
+        | map(attribute='item')
+        | list
+      }}
+  when: vpn_cert_use_existing | bool
+  changed_when: false
+
+- name: Auto-issue missing TLS certificate via Certbot (when enabled)
+  ansible.builtin.include_role:
+    name: certbot
+  vars:
+    certbot_action: "issue"
+    certbot_domains:
+      - "{{ vpn_domain }}"
+    certbot_cert_name: "{{ vpn_domain }}"
+    certbot_method: "{{ vpn_certbot_method | default('standalone') }}"
+    certbot_auth_args: "{{ vpn_certbot_auth_args | default([]) }}"
+    certbot_extra_args: "{{ vpn_certbot_extra_args | default([]) }}"
+    certbot_standalone_stop_services: "{{ vpn_certbot_standalone_stop_services | default(['nginx','apache2','pihole-FTL']) }}"
+    certbot_deploy_hook_services:
+      - ocserv
+  when:
+    - vpn_cert_use_existing | bool
+    - (_common_vpn_missing_cert_files | default([]) | length) > 0
+    - vpn_cert_auto_issue_enable | default(true) | bool
+  tags: ['certbot']
+
+- name: Re-check existing TLS certificate files (after auto-issue)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _common_vpn_existing_cert_stat_after
+  loop:
+    - "{{ vpn_cert_fullchain }}"
+    - "{{ vpn_cert_key }}"
+  when:
+    - vpn_cert_use_existing | bool
+    - (_common_vpn_missing_cert_files | default([]) | length) > 0
+    - vpn_cert_auto_issue_enable | default(true) | bool
+  changed_when: false
+
+- name: Update missing TLS certificate list (after auto-issue)
+  ansible.builtin.set_fact:
+    _common_vpn_missing_cert_files: >-
+      {{
+        (_common_vpn_existing_cert_stat_after.results | default([]))
+        | rejectattr('stat.exists', 'equalto', true)
+        | map(attribute='item')
+        | list
+      }}
+  when:
+    - vpn_cert_use_existing | bool
+    - (_common_vpn_missing_cert_files | default([]) | length) > 0
+    - vpn_cert_auto_issue_enable | default(true) | bool
+  changed_when: false
+
+- name: Fail when existing TLS certificate files are missing
+  ansible.builtin.assert:
+    that:
+      - (_common_vpn_missing_cert_files | default([]) | length) == 0
+    fail_msg: >-
+      vpn_cert_use_existing=true but certificate files are missing.
+      Missing (or broken symlinks):
+      - {{ (_common_vpn_missing_cert_files | default([])) | join('\n      - ') }}
+      Expected:
+      - {{ vpn_cert_fullchain }}
+      - {{ vpn_cert_key }}
+      If you want Ansible to issue them automatically:
+      - keep vpn_cert_auto_issue_enable=true (default)
+      - set vault_certbot_email (Ansible Vault)
+      - ensure vpn_domain resolves to this host for ACME validation (or configure DNS-01 via vpn_certbot_method/vpn_certbot_auth_args)
+      Otherwise switch to self-signed (tuxedovpn_tls_mode: selfsigned).
+  when: vpn_cert_use_existing | bool
+
+- name: Determine VPN test password
+  ansible.builtin.set_fact:
+    _vpn_test_password: >-
+      {{
+        vpn_default_user_password
+        | default(vault_vpn_default_user_password, true)
+      }}
+
+- name: Ensure radius server list provided when required
+  ansible.builtin.assert:
+    that:
+      - (vpn_radius_servers | length) > 0
+      - (vpn_radius_servers | selectattr('secret', 'defined') | list | length) == (vpn_radius_servers | length)
+      - (vpn_radius_servers | selectattr('host', 'defined') | list | length) == (vpn_radius_servers | length)
+    fail_msg: "vpn_radius_servers must be defined when vpn_auth_mode == 'radius'."
+  when: vpn_auth_mode == 'radius'
+
+- name: Ensure radcli directory exists
+  ansible.builtin.file:
+    path: /etc/radcli
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: vpn_auth_mode == 'radius'
+
+- name: Render radcli radiusclient.conf
+  ansible.builtin.template:
+    src: "radiusclient.conf.j2"
+    dest: "{{ vpn_radius_config }}"
+    owner: root
+    group: root
+    mode: '0640'
+  no_log: true
+  when: vpn_auth_mode == 'radius'
+
+- name: Render radcli servers file
+  ansible.builtin.template:
+    src: "servers.j2"
+    dest: "/etc/radcli/servers"
+    owner: root
+    group: root
+    mode: '0640'
+  no_log: true
+  when: vpn_auth_mode == 'radius'
+
+- name: Render ocserv config
+  ansible.builtin.template:
+    src: "{{ common_vpn_template_src }}"
+    dest: "/etc/ocserv/ocserv.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: ["Restart ocserv"]
+  tags: ['ocserv', 'config']
+
+- name: Apply ocserv config immediately (flush handlers)
+  ansible.builtin.meta: flush_handlers
+  tags: ['ocserv', 'config']
+
+- import_tasks: fail2ban.yml
+
+- name: Determine VPN test password
+  ansible.builtin.set_fact:
+    _vpn_test_password: >-
+      {{
+        vpn_default_user_password
+        | default(vault_vpn_default_user_password, true)
+      }}
+
+- name: Compute server certificate pin (sha256)
+  ansible.builtin.shell: |
+    set -o pipefail
+    openssl x509 -in {{ _ocserv_cert_fullchain }} -pubkey -noout \
+      | openssl pkey -pubin -outform DER \
+      | openssl dgst -sha256 -binary \
+      | openssl base64
+  register: _vpn_servercert_pin
+  changed_when: false
+  failed_when: false
+  when:
+    - vpn_connection_test_enable | default(false) | bool
+    - (_ocserv_cert_fullchain | default('') | length) > 0
+
+- name: Set VPN server certificate pin fact
+  ansible.builtin.set_fact:
+    _vpn_servercert_pin_trimmed: "{{ _vpn_servercert_pin.stdout | default('') | trim }}"
+  when:
+    - vpn_connection_test_enable | default(false) | bool
+
+- name: Ensure ocserv is enabled and started
+  ansible.builtin.service:
+    name: ocserv
+    enabled: true
+    state: started
+  tags: ['ocserv', 'service']
+
+- name: Test VPN authentication via openconnect
+  ansible.builtin.command: >
+    openconnect --authenticate --protocol=anyconnect --non-inter
+    --user={{ vpn_default_user_name | default('support') }}
+    --passwd-on-stdin
+    --servercert pin-sha256:{{ _vpn_servercert_pin_trimmed }}
+    https://{{ vpn_connection_test_address }}:{{ vpn_listen_port }}
+  args:
+    stdin: "{{ _vpn_test_password }}"
+  register: _openconnect_auth_test
+  changed_when: false
+  failed_when: _openconnect_auth_test.rc != 0
+  environment:
+    LC_ALL: C
+  when:
+    - vpn_connection_test_enable | default(false) | bool
+    - (_vpn_test_password | default('') | length) > 0
+    - (_vpn_servercert_pin_trimmed | default('') | length) > 0
+    - not (vpn_listen_proxy_proto | bool)
+  tags: ['ocserv', 'test']
+
+- name: Deploy ocserv Prometheus exporter script
+  ansible.builtin.template:
+    src: ocserv_prometheus_exporter.py.j2
+    dest: /usr/local/bin/ocserv_prometheus_exporter.py
+    owner: root
+    group: root
+    mode: '0755'
+  when: common_vpn_exporter_enable | bool
+  notify: Restart ocserv Prometheus exporter
+
+- name: Install ocserv Prometheus exporter service
+  ansible.builtin.template:
+    src: ocserv-prometheus-exporter.service.j2
+    dest: /etc/systemd/system/ocserv-prometheus-exporter.service
+    owner: root
+    group: root
+    mode: '0644'
+  when: common_vpn_exporter_enable | bool
+  notify: Restart ocserv Prometheus exporter
+
+- name: Ensure ocserv Prometheus exporter is running
+  ansible.builtin.systemd:
+    name: ocserv-prometheus-exporter.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: common_vpn_exporter_enable | bool
+  tags: ['ocserv', 'metrics']
+
+- name: Ensure python3-pexpect is present (local auth only)
+  ansible.builtin.apt:
+    name: python3-pexpect
+    state: present
+    update_cache: true
+    lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
+  when:
+    - ansible_pkg_mgr == 'apt'
+    - vpn_auth_mode == 'local'
+    - vpn_manage_users | bool
+  tags: ['ocserv','users']
+
+- name: Ensure python3-pexpect is present (local auth only, generic)
+  ansible.builtin.package:
+    name: python3-pexpect
+    state: present
+  when:
+    - ansible_pkg_mgr != 'apt'
+    - vpn_auth_mode == 'local'
+    - vpn_manage_users | bool
+  tags: ['ocserv','users']
+
+- name: Upsert ocserv user (TTY-safe, single task)
+  ansible.builtin.expect:
+    command: >-
+      bash -lc 'test -s "{{ vpn_ocpasswd_file }}" &&
+                ocpasswd "{{ vpn_ocpasswd_file }}" "{{ vpn_default_user_name | default("support") }}" ||
+                ocpasswd -c "{{ vpn_ocpasswd_file }}" "{{ vpn_default_user_name | default("support") }}"'
+    responses:
+      '(?i)Enter password:': '{{ _vpn_test_password }}'
+      '(?i)Re-enter password:': '{{ _vpn_test_password }}'
+  no_log: true
+  when:
+    - vpn_auth_mode == 'local'
+    - vpn_manage_users | bool
+  notify: ["Restart ocserv"]
+  tags: ['ocserv','users']
+
+- import_tasks: 00_detect_uplink.yml
+- import_tasks: sysctl.yml
+- import_tasks: ufw.yml

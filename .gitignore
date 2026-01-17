@@ -1,0 +1,23 @@
+# Secrets (never commit)
+vault.yml
+inventory/hosts.ini
+.vault_pass
+.vault-password
+.vault_password
+
+# Ansible
+*.retry
+
+# Vagrant
+.vagrant/
+
+# Python (tuxedo)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+inventory/hosts.ini
+backup.bundle

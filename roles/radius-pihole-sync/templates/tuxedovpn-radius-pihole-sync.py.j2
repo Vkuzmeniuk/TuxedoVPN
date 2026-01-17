@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+import json
+import logging
+import os
+import select
+import shlex
+import sqlite3
+import subprocess
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import psycopg2
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+LOG_LEVEL = (os.environ.get("LOG_LEVEL", "INFO") or "INFO").upper()
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("tuxedovpn-radius-pihole-sync")
+
+
+PG_NOTIFY_CHANNEL = (os.environ.get("PG_NOTIFY_CHANNEL", "tuxedovpn_pihole_sync") or "").strip()
+PG_CONNECT_TIMEOUT = _env_int("PG_CONNECT_TIMEOUT", 2)
+PG_STATEMENT_TIMEOUT_SECONDS = _env_int("PG_STATEMENT_TIMEOUT_SECONDS", 5)
+
+PIHOLE_GRAVITY_DB = (os.environ.get("PIHOLE_GRAVITY_DB", "/etc/pihole/gravity.db") or "").strip()
+PIHOLE_GROUP_PREFIX = (os.environ.get("PIHOLE_GROUP_PREFIX", "radius:") or "radius:").strip()
+PIHOLE_DEFAULT_GROUP = (os.environ.get("PIHOLE_DEFAULT_GROUP", "Default") or "Default").strip()
+PIHOLE_MANAGED_CLIENT_COMMENT_PREFIX = (
+    os.environ.get("PIHOLE_MANAGED_CLIENT_COMMENT_PREFIX", "tuxedovpn-radius:") or "tuxedovpn-radius:"
+).strip()
+PIHOLE_RELOAD_COMMAND = (os.environ.get("PIHOLE_RELOAD_COMMAND", "") or "").strip()
+PIHOLE_RELOAD_MIN_INTERVAL_SECONDS = _env_int("PIHOLE_RELOAD_MIN_INTERVAL_SECONDS", 10)
+
+SYNC_DEBOUNCE_SECONDS = _env_float("SYNC_DEBOUNCE_SECONDS", 0.5)
+FULL_SYNC_INTERVAL_SECONDS = _env_int("FULL_SYNC_INTERVAL_SECONDS", 300)
+
+METRICS_LISTEN_IP = (os.environ.get("METRICS_LISTEN_IP", "127.0.0.1") or "127.0.0.1").strip()
+METRICS_LISTEN_PORT = _env_int("METRICS_LISTEN_PORT", 9817)
+METRICS_PATH = (os.environ.get("METRICS_PATH", "/metrics") or "/metrics").strip()
+
+
+def _sanitize_text(value: str) -> str:
+    return (value or "").replace("\r", " ").replace("\n", " ").strip()
+
+
+def _pihole_group_name(radius_group: str) -> str:
+    g = _sanitize_text(radius_group)
+    if not g:
+        g = PIHOLE_DEFAULT_GROUP
+    return PIHOLE_GROUP_PREFIX + g
+
+
+def _client_comment(username: str, radius_group: str) -> str:
+    u = _sanitize_text(username) or "unknown"
+    g = _sanitize_text(radius_group) or PIHOLE_DEFAULT_GROUP
+    return "{}user={} group={}".format(PIHOLE_MANAGED_CLIENT_COMMENT_PREFIX, u, g)
+
+
+def _validate_pg_channel(channel: str) -> str:
+    value = (channel or "").strip()
+    if not value:
+        raise ValueError("PG_NOTIFY_CHANNEL is empty")
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    for ch in value:
+        if ch not in allowed:
+            raise ValueError("PG_NOTIFY_CHANNEL contains invalid character: {!r}".format(ch))
+    return value
+
+
+class Metrics:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.start_ts = int(time.time())
+        self.last_attempt_ts = 0
+        self.last_success_ts = 0
+        self.last_duration_seconds = 0.0
+        self.errors_total = 0
+        self.reloads_total = 0
+        self.last_reload_ts = 0
+        self.active_clients = 0
+        self.last_changes = 0
+
+    def record_attempt(self):
+        with self.lock:
+            self.last_attempt_ts = int(time.time())
+
+    def record_success(self, duration_seconds: float, active_clients: int, changes: int):
+        with self.lock:
+            self.last_success_ts = int(time.time())
+            self.last_duration_seconds = float(duration_seconds)
+            self.active_clients = int(active_clients)
+            self.last_changes = int(changes)
+
+    def record_error(self):
+        with self.lock:
+            self.errors_total += 1
+
+    def record_reload(self):
+        with self.lock:
+            self.reloads_total += 1
+            self.last_reload_ts = int(time.time())
+
+    def get_last_reload_ts(self) -> int:
+        with self.lock:
+            return int(self.last_reload_ts)
+
+    def render(self) -> str:
+        now = int(time.time())
+        with self.lock:
+            last_attempt = int(self.last_attempt_ts)
+            last_success = int(self.last_success_ts)
+            last_duration = float(self.last_duration_seconds)
+            errors_total = int(self.errors_total)
+            reloads_total = int(self.reloads_total)
+            last_reload = int(self.last_reload_ts)
+            active_clients = int(self.active_clients)
+            last_changes = int(self.last_changes)
+
+        lines = []
+        lines.append("# HELP tuxedovpn_radius_pihole_sync_up Whether the sync service is running")
+        lines.append("# TYPE tuxedovpn_radius_pihole_sync_up gauge")
+        lines.append("tuxedovpn_radius_pihole_sync_up 1")
+
+        lines.append("# HELP tuxedovpn_radius_pihole_sync_uptime_seconds Sync service uptime (seconds)")
+        lines.append("# TYPE tuxedovpn_radius_pihole_sync_uptime_seconds gauge")
+        lines.append("tuxedovpn_radius_pihole_sync_uptime_seconds {}".format(now - self.start_ts))
+
+        lines.append("# HELP tuxedovpn_radius_pihole_sync_last_attempt_timestamp_seconds Timestamp of the last sync attempt")
+        lines.append("# TYPE tuxedovpn_radius_pihole_sync_last_attempt_timestamp_seconds gauge")
+        lines.append("tuxedovpn_radius_pihole_sync_last_attempt_timestamp_seconds {}".format(last_attempt))
+
+        lines.append("# HELP tuxedovpn_radius_pihole_sync_last_success_timestamp_seconds Timestamp of the last successful sync")
+        lines.append("# TYPE tuxedovpn_radius_pihole_sync_last_success_timestamp_seconds gauge")
+        lines.append("tuxedovpn_radius_pihole_sync_last_success_timestamp_seconds {}".format(last_success))
+
+        lines.append("# HELP tuxedovpn_radius_pihole_sync_last_duration_seconds Duration of the last successful sync")
+        lines.append("# TYPE tuxedovpn_radius_pihole_sync_last_duration_seconds gauge")
+        lines.append("tuxedovpn_radius_pihole_sync_last_duration_seconds {}".format(last_duration))
+
+        lines.append("# HELP tuxedovpn_radius_pihole_sync_errors_total Total sync errors")
+        lines.append("# TYPE tuxedovpn_radius_pihole_sync_errors_total counter")
+        lines.append("tuxedovpn_radius_pihole_sync_errors_total {}".format(errors_total))
+
+        lines.append("# HELP tuxedovpn_radius_pihole_sync_reload_total Number of Pi-hole reloads triggered by the service")
+        lines.append("# TYPE tuxedovpn_radius_pihole_sync_reload_total counter")
+        lines.append("tuxedovpn_radius_pihole_sync_reload_total {}".format(reloads_total))
+
+        lines.append("# HELP tuxedovpn_radius_pihole_sync_last_reload_timestamp_seconds Timestamp of the last Pi-hole reload")
+        lines.append("# TYPE tuxedovpn_radius_pihole_sync_last_reload_timestamp_seconds gauge")
+        lines.append("tuxedovpn_radius_pihole_sync_last_reload_timestamp_seconds {}".format(last_reload))
+
+        lines.append("# HELP tuxedovpn_radius_pihole_sync_active_clients Number of active VPN clients present in sync")
+        lines.append("# TYPE tuxedovpn_radius_pihole_sync_active_clients gauge")
+        lines.append("tuxedovpn_radius_pihole_sync_active_clients {}".format(active_clients))
+
+        lines.append("# HELP tuxedovpn_radius_pihole_sync_last_changes Number of changed SQLite rows in the last successful sync")
+        lines.append("# TYPE tuxedovpn_radius_pihole_sync_last_changes gauge")
+        lines.append("tuxedovpn_radius_pihole_sync_last_changes {}".format(last_changes))
+
+        return "\n".join(lines) + "\n"
+
+
+metrics = Metrics()
+
+
+class MetricsHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.rstrip("/") != METRICS_PATH.rstrip("/"):
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found\n")
+            return
+        payload = metrics.render().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, fmt, *args):
+        return
+
+
+def _start_metrics_server():
+    server = ThreadingHTTPServer((METRICS_LISTEN_IP, METRICS_LISTEN_PORT), MetricsHandler)
+    server.serve_forever()
+
+
+def _pg_connect():
+    conn = psycopg2.connect(connect_timeout=PG_CONNECT_TIMEOUT)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("SET statement_timeout = %s;", (PG_STATEMENT_TIMEOUT_SECONDS * 1000,))
+    return conn
+
+
+def _fetch_active_sessions(conn):
+    query = """
+        SELECT
+            a.username::text AS username,
+            a.framedipaddress::text AS ip,
+            COALESCE(ug.groupname::text, '') AS groupname
+        FROM radacct a
+        LEFT JOIN LATERAL (
+            SELECT groupname
+              FROM radusergroup
+             WHERE username = a.username
+             ORDER BY priority ASC, id ASC
+             LIMIT 1
+        ) ug ON TRUE
+        WHERE a.acctstoptime IS NULL
+          AND a.username IS NOT NULL
+          AND a.framedipaddress IS NOT NULL;
+    """
+    with conn.cursor() as cur:
+        cur.execute(query)
+        rows = cur.fetchall()
+    active = {}
+    for username, ip, groupname in rows:
+        ip_s = _sanitize_text(str(ip))
+        if not ip_s:
+            continue
+        active[ip_s] = (str(username), str(groupname or ""))
+    return active
+
+
+def _sqlite_connect(path: str):
+    con = sqlite3.connect(path, timeout=5.0)
+    con.execute("PRAGMA foreign_keys = ON;")
+    con.execute("PRAGMA busy_timeout = 5000;")
+    return con
+
+
+def _ensure_group(con: sqlite3.Connection, name: str, description: str) -> int:
+    row = con.execute('SELECT id FROM "group" WHERE name = ?;', (name,)).fetchone()
+    if row:
+        return int(row[0])
+    now = int(time.time())
+    con.execute(
+        'INSERT INTO "group" (enabled, name, date_added, date_modified, description) VALUES (1, ?, ?, ?, ?);',
+        (name, now, now, description),
+    )
+    return int(con.execute('SELECT id FROM "group" WHERE name = ?;', (name,)).fetchone()[0])
+
+
+def _ensure_client(con: sqlite3.Connection, ip: str, comment: str) -> tuple[int, int]:
+    row = con.execute("SELECT id, comment FROM client WHERE ip = ?;", (ip,)).fetchone()
+    now = int(time.time())
+    if not row:
+        cur = con.execute(
+            "INSERT INTO client (ip, date_added, date_modified, comment) VALUES (?, ?, ?, ?);",
+            (ip, now, now, comment),
+        )
+        client_id = int(cur.lastrowid)
+        return client_id, 1
+    client_id = int(row[0])
+    existing_comment = row[1] if row[1] is not None else ""
+    if str(existing_comment) != str(comment):
+        cur = con.execute(
+            "UPDATE client SET comment = ?, date_modified = ? WHERE id = ?;",
+            (comment, now, client_id),
+        )
+        return client_id, int(cur.rowcount or 0)
+    return client_id, 0
+
+
+def _sync_to_pihole(active: dict[str, tuple[str, str]]) -> int:
+    desired_group_names = set()
+    for _ip, (username, groupname) in active.items():
+        desired_group_names.add(_pihole_group_name(groupname))
+
+    description = "Managed by TuxedoVPN (RADIUS group sync)"
+    changes = 0
+    with _sqlite_connect(PIHOLE_GRAVITY_DB) as con:
+        con.execute("BEGIN IMMEDIATE;")
+
+        group_id_by_name = {}
+        for name in sorted(desired_group_names):
+            gid = _ensure_group(con, name, description)
+            group_id_by_name[name] = gid
+
+        managed_prefix_like = PIHOLE_MANAGED_CLIENT_COMMENT_PREFIX + "%"
+        existing_managed = {}
+        for cid, ip in con.execute("SELECT id, ip FROM client WHERE comment LIKE ?;", (managed_prefix_like,)):
+            existing_managed[str(ip)] = int(cid)
+
+        # Remove managed clients that no longer have active sessions.
+        active_ips = set(active.keys())
+        for ip, cid in list(existing_managed.items()):
+            if ip in active_ips:
+                continue
+            cur = con.execute("DELETE FROM client WHERE id = ?;", (cid,))
+            changes += int(cur.rowcount or 0)
+
+        # Insert/update active clients and ensure exactly one group membership.
+        for ip, (username, groupname) in sorted(active.items()):
+            pihole_group = _pihole_group_name(groupname)
+            group_id = group_id_by_name.get(pihole_group)
+            if group_id is None:
+                group_id = _ensure_group(con, pihole_group, description)
+                group_id_by_name[pihole_group] = group_id
+
+            comment = _client_comment(username, groupname)
+            client_id, delta = _ensure_client(con, ip, comment)
+            changes += int(delta)
+
+            cur = con.execute("DELETE FROM client_by_group WHERE client_id = ?;", (client_id,))
+            changes += int(cur.rowcount or 0)
+            cur = con.execute(
+                "INSERT OR IGNORE INTO client_by_group (client_id, group_id) VALUES (?, ?);",
+                (client_id, group_id),
+            )
+            changes += int(cur.rowcount or 0)
+
+        con.commit()
+    return changes
+
+
+def _maybe_reload_pihole(force: bool = False) -> bool:
+    if not PIHOLE_RELOAD_COMMAND:
+        return False
+    now = int(time.time())
+    last = metrics.get_last_reload_ts()
+    if not force and (now - last) < PIHOLE_RELOAD_MIN_INTERVAL_SECONDS:
+        return False
+    try:
+        cmd = shlex.split(PIHOLE_RELOAD_COMMAND)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            log.warning("Pi-hole reload failed (rc=%s): %s", result.returncode, stderr)
+            return False
+        metrics.record_reload()
+        return True
+    except Exception as exc:
+        log.warning("Pi-hole reload exception: %s", exc)
+        return False
+
+
+def _run_once(conn) -> tuple[int, int]:
+    active = _fetch_active_sessions(conn)
+    changes = _sync_to_pihole(active)
+    return len(active), changes
+
+
+def main():
+    channel = _validate_pg_channel(PG_NOTIFY_CHANNEL)
+
+    t = threading.Thread(target=_start_metrics_server, daemon=True)
+    t.start()
+
+    sync_pending = True
+    sync_due_at = 0.0
+    reload_pending = False
+    reload_due_at = 0.0
+    last_full_sync = 0.0
+
+    while True:
+        try:
+            conn = _pg_connect()
+            with conn.cursor() as cur:
+                cur.execute("LISTEN {};".format(channel))
+            log.info("Listening for Postgres NOTIFY on channel: %s", channel)
+
+            # Always reconcile on connect/reconnect.
+            sync_pending = True
+            sync_due_at = time.time()
+            last_full_sync = time.time()
+
+            while True:
+                now = time.time()
+                if FULL_SYNC_INTERVAL_SECONDS > 0 and (now - last_full_sync) >= FULL_SYNC_INTERVAL_SECONDS:
+                    sync_pending = True
+                    sync_due_at = now
+                    last_full_sync = now
+
+                timeout = 1.0
+                ready, _, _ = select.select([conn], [], [], timeout)
+                if ready:
+                    conn.poll()
+                    while conn.notifies:
+                        conn.notifies.pop(0)
+                        sync_pending = True
+                        sync_due_at = time.time() + SYNC_DEBOUNCE_SECONDS
+
+                if sync_pending and time.time() >= sync_due_at:
+                    sync_pending = False
+                    metrics.record_attempt()
+                    start = time.time()
+                    try:
+                        active_clients, changes = _run_once(conn)
+                        duration = time.time() - start
+                        metrics.record_success(duration, active_clients, changes)
+                        if changes > 0:
+                            if PIHOLE_RELOAD_COMMAND:
+                                if not _maybe_reload_pihole(force=False):
+                                    last_reload = metrics.get_last_reload_ts()
+                                    reload_pending = True
+                                    reload_due_at = max(time.time(), float(last_reload + PIHOLE_RELOAD_MIN_INTERVAL_SECONDS))
+                        log.info("Sync ok: active_clients=%s changes=%s", active_clients, changes)
+                    except Exception:
+                        metrics.record_error()
+                        log.exception("Sync failed")
+
+                if reload_pending and time.time() >= reload_due_at:
+                    _maybe_reload_pihole(force=True)
+                    reload_pending = False
+
+        except Exception:
+            metrics.record_error()
+            log.exception("Postgres connection/listen failed; retrying")
+            time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()

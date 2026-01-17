@@ -1,0 +1,113 @@
+{% if freeradius_enable_blocklist | bool %}
+check_vpn_blocklist {
+    update control {
+        Tmp-String-0 := "{% raw %}%{sql:SELECT CASE WHEN expires_at IS NULL THEN 'Access denied: account is blocked by security policy.' ELSE ('Access denied: ' || (CASE WHEN COALESCE(reason,'') ~* '(bittorrent|torrent|p2p)' THEN 'torrent usage' ELSE 'policy violation' END) || '. Block remains for ~' || GREATEST(1, CEIL(EXTRACT(EPOCH FROM (expires_at - NOW())) / 60.0))::int || ' min (until ' || to_char(expires_at, 'DD.MM HH24:MI') || ' ' || to_char(expires_at, 'TZ') || ', UTC' || to_char(expires_at, 'OF') || ').') END FROM vpn_user_blocklist WHERE username = '%{%{SQL-User-Name}:-%{User-Name}}' AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1}{% endraw %}"
+    }
+
+    if (&control:Tmp-String-0 != "") {
+        update reply {
+            Reply-Message := "{% raw %}%{control:Tmp-String-0}{% endraw %}"
+        }
+        reject
+    }
+
+    update control {
+        Tmp-String-0 := ''
+    }
+}
+{% else %}
+check_vpn_blocklist {
+    ok
+}
+{% endif %}
+
+{# ------------------------------------------------------------------------- #}
+{# Access control: restrict selected NAS clients to admin group only.         #}
+{# Use-case: "mgmt/private VPN" when NAS = localhost.                         #}
+{# ------------------------------------------------------------------------- #}
+enforce_admin_only_nas {
+{% set _enforce = freeradius_admin_only_nas_enforce | default(false) | bool %}
+{% set _admin_group = freeradius_admin_group_name | default('admins') %}
+{% set _nas_shortnames = freeradius_admin_only_nas_shortnames | default([]) %}
+{% set _nas_ips = freeradius_admin_only_nas_ips | default([]) %}
+{% set _radius_username_expr = "%{%{SQL-User-Name}:-%{User-Name}}" %}
+{% set _nas_conds = [] %}
+{% for sn in _nas_shortnames %}
+{%   set _ = _nas_conds.append('(\"%{client:shortname}\" == \"' ~ sn ~ '\")') %}
+{% endfor %}
+{% for ip in _nas_ips %}
+{%   set _ = _nas_conds.append('(\"%{client:ipaddr}\" == \"' ~ ip ~ '\")') %}
+{% endfor %}
+{% if not _enforce or ((_nas_shortnames | length) == 0 and (_nas_ips | length) == 0) %}
+	    ok
+{% else %}
+	    if ( {{ _nas_conds | join(' || ') }} ) {
+	        update control {
+	            Tmp-String-1 := "%{sql:SELECT 1 FROM {{ freeradius_sql_usergroup_table | default('radusergroup') }} WHERE username = '{{ _radius_username_expr }}' AND groupname = '{{ _admin_group }}' LIMIT 1}"
+	        }
+
+        if (&control:Tmp-String-1 != "1") {
+            update reply {
+                Reply-Message := "Access denied: insufficient privileges."
+            }
+            reject
+        }
+
+        update control {
+            Tmp-String-1 := ''
+        }
+    }
+{% endif %}
+}
+
+enforce_vpn_limits {
+    {% if freeradius_enable_simultaneous_use | bool %}
+    {% set _max_sessions = freeradius_default_simultaneous_use | int %}
+    {% if _max_sessions > 0 %}
+    # Global Simultaneous-Use limit (hard cap) for all VPN users.
+    # If the user has a smaller personal limit, keep it; clamp bigger/zero values
+    # to the global limit.
+    if (!&control:Simultaneous-Use) {
+        update control {
+            Simultaneous-Use := {{ _max_sessions }}
+        }
+    }
+
+    if (&control:Simultaneous-Use && (&control:Simultaneous-Use <= 0)) {
+        update control {
+            Simultaneous-Use := {{ _max_sessions }}
+        }
+    }
+
+    if (&control:Simultaneous-Use && (&control:Simultaneous-Use > {{ _max_sessions }})) {
+        update control {
+            Simultaneous-Use := {{ _max_sessions }}
+        }
+    }
+
+    # Enforce Simultaneous-Use using accounting state (radacct).
+    # We do this explicitly (instead of `rlm_sqlcounter`'s `reply_name = Reply-Message`)
+    # to avoid leaking raw numeric counters to VPN clients as a "message".
+    update control {
+        Tmp-Integer-0 := "%{sql:SELECT COUNT(*) FROM radacct WHERE username = '{% raw %}%{%{SQL-User-Name}:-%{User-Name}}{% endraw %}' AND acctstoptime IS NULL}"
+    }
+
+    if (&control:Tmp-Integer-0 >= &control:Simultaneous-Use) {
+        update reply {
+            Reply-Message := "{% raw %}Access denied: too many concurrent sessions (%{control:Tmp-Integer-0}/%{control:Simultaneous-Use}).{% endraw %}"
+        }
+        reject
+    }
+
+    update control {
+        Tmp-Integer-0 := 0
+    }
+    {% endif %}
+    {% endif %}
+
+    {% if freeradius_enable_daily_quota | bool %}
+    if (&control:{{ freeradius_daily_quota_attribute }} && &control:{{ freeradius_daily_quota_attribute }} > 0) {
+        sqlcounter_daily_data
+    }
+    {% endif %}
+}

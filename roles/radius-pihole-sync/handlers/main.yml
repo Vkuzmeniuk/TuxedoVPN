@@ -1,0 +1,6 @@
+---
+- name: Restart tuxedovpn RADIUS Pi-hole sync
+  ansible.builtin.systemd:
+    name: tuxedovpn-radius-pihole-sync.service
+    state: restarted
+    daemon_reload: true

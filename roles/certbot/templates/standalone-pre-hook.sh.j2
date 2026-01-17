@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Managed by Ansible (role: certbot)
+# Called by certbot before renewals when using standalone mode.
+#
+# Stops selected services to free ports required by the ACME challenge (typically :443).
+
+STATE_FILE="/run/tuxedovpn-certbot-standalone-stopped-services"
+: > "${STATE_FILE}"
+
+# Temporarily allow inbound HTTP-01 validation traffic (tcp/80) through UFW/iptables.
+RULE_COMMENT="tuxedovpn-certbot-http01"
+CHAIN="ufw-user-input"
+
+if command -v iptables >/dev/null 2>&1; then
+  if ! iptables -S "${CHAIN}" >/dev/null 2>&1; then
+    CHAIN="INPUT"
+  fi
+
+  if ! iptables -C "${CHAIN}" -p tcp --dport 80 -m comment --comment "${RULE_COMMENT}" -j ACCEPT >/dev/null 2>&1; then
+    iptables -I "${CHAIN}" 1 -p tcp --dport 80 -m comment --comment "${RULE_COMMENT}" -j ACCEPT >/dev/null 2>&1 || true
+    echo "iptables:${CHAIN}" >> "${STATE_FILE}"
+  fi
+fi
+
+{% set services = (_certbot_standalone_stop_services | default([])) %}
+{% if services | length == 0 %}
+exit 0
+{% endif %}
+
+for svc in {{ services | to_json }}; do
+  unit="${svc}"
+  if systemctl list-unit-files --no-legend --no-pager | awk '{print $1}' | grep -qx "${svc}.service"; then
+    unit="${svc}.service"
+  fi
+
+  if systemctl is-active --quiet "${unit}"; then
+    systemctl stop "${unit}" >/dev/null 2>&1 || true
+    echo "${unit}" >> "${STATE_FILE}"
+  fi
+done

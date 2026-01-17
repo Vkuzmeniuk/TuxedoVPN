@@ -1,0 +1,713 @@
+#!/usr/bin/env python3
+import json
+import os
+import re
+import subprocess
+import threading
+import time
+import socket
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address, ip_network
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+from datetime import datetime, timezone
+
+
+EVE_FILE = os.environ.get("EVE_FILE", "/var/log/suricata/eve.json")
+LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
+LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "9815"))
+METRICS_PATH = os.environ.get("METRICS_PATH", "/metrics")
+SIGNATURE_MATCH_REGEX = os.environ.get("SIGNATURE_MATCH_REGEX", r"(?i)\b(torrent|bittorrent)\b")
+MATCH_MODE = (os.environ.get("MATCH_MODE", "ruleset") or "ruleset").strip().lower()
+RULESET_PATH = os.environ.get("RULESET_PATH", "/var/lib/suricata/rules/suricata.rules")
+IGNORE_SIDS_RAW = os.environ.get("IGNORE_SIDS", "")
+EVE_EVENT_TYPES_RAW = os.environ.get("EVE_EVENT_TYPES", "alert,drop,bittorrent_dht")
+BLOCK_SECONDS = int(os.environ.get("BLOCK_SECONDS", "900"))
+ENFORCE_POLL_SECONDS = int(os.environ.get("ENFORCE_POLL_SECONDS", "5"))
+ENFORCE_MIN_INTERVAL_SECONDS = int(os.environ.get("ENFORCE_MIN_INTERVAL_SECONDS", "5"))
+IP_CORRELATION_SECONDS = int(os.environ.get("IP_CORRELATION_SECONDS", "120"))
+DISCONNECT_COOLDOWN_SECONDS = int(os.environ.get("DISCONNECT_COOLDOWN_SECONDS", "60"))
+DETECT_DEDUP_SECONDS = int(os.environ.get("DETECT_DEDUP_SECONDS", str(DISCONNECT_COOLDOWN_SECONDS)))
+ACTION_COOLDOWN_SECONDS = int(os.environ.get("ACTION_COOLDOWN_SECONDS", str(DISCONNECT_COOLDOWN_SECONDS)))
+OCCTL_BIN = os.environ.get("OCCTL_BIN", "/usr/bin/occtl")
+VPN_SUBNETS_RAW = os.environ.get("VPN_SUBNETS", "")
+MGMT_WEBHOOK_URL = os.environ.get("MGMT_WEBHOOK_URL", "").strip()
+MGMT_WEBHOOK_TOKEN = os.environ.get("MGMT_WEBHOOK_TOKEN", "").strip()
+
+NODE_NAME = os.environ.get("NODE_NAME") or os.environ.get("HOSTNAME") or socket.gethostname()
+HOST = os.environ.get("HOSTNAME") or NODE_NAME
+SAFE_NODE_NAME = (NODE_NAME or "unknown").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def _log(msg: str):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+
+def _log_event(event: str, fields: dict):
+    payload = {
+        "ts_utc": datetime.now(timezone.utc).isoformat(),
+        "event": str(event or "").strip() or "unknown",
+        "nodename": NODE_NAME or "",
+    }
+    if isinstance(fields, dict):
+        payload.update({k: v for k, v in fields.items() if v is not None})
+    print("DPI_EVENT " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+
+try:
+    signature_re = re.compile(SIGNATURE_MATCH_REGEX)
+except re.error as e:
+    _log(f"FATAL: invalid SIGNATURE_MATCH_REGEX={SIGNATURE_MATCH_REGEX!r}: {e}")
+    raise SystemExit(2)
+
+_sid_re = re.compile(r"\\bsid\\s*:\\s*(\\d+)\\s*;")
+
+
+def _parse_int_set(raw: str):
+    items = set()
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            items.add(int(part))
+        except ValueError:
+            continue
+    return items
+
+
+IGNORE_SIDS = _parse_int_set(IGNORE_SIDS_RAW)
+
+EVE_EVENT_TYPES = {x.strip() for x in (EVE_EVENT_TYPES_RAW or "").split(",") if x.strip()}
+
+
+def _load_sids_from_rules(path: str):
+    sids = set()
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                m = _sid_re.search(line)
+                if not m:
+                    continue
+                try:
+                    sid = int(m.group(1))
+                except ValueError:
+                    continue
+                if sid not in IGNORE_SIDS:
+                    sids.add(sid)
+    except FileNotFoundError:
+        return set()
+    except OSError:
+        return set()
+    return sids
+
+
+_ruleset_cache = {"ts": 0.0, "sids": set()}
+
+
+def _actionable_sid_set():
+    # Periodically reload the ruleset in case rules are updated.
+    now = time.time()
+    if now - _ruleset_cache["ts"] > 30:
+        _ruleset_cache["sids"] = _load_sids_from_rules(RULESET_PATH)
+        _ruleset_cache["ts"] = now
+    return _ruleset_cache["sids"]
+
+
+def _matches_policy(alert: dict) -> bool:
+    signature = str((alert or {}).get("signature") or "")
+    sid = (alert or {}).get("signature_id")
+    try:
+        sid_int = int(sid) if sid is not None else None
+    except (TypeError, ValueError):
+        sid_int = None
+
+    if MATCH_MODE in ("ruleset", "sid", "sids"):
+        if sid_int is None:
+            return False
+        return sid_int in _actionable_sid_set()
+    if MATCH_MODE in ("regex",):
+        return bool(signature_re.search(signature))
+    if MATCH_MODE in ("both", "any"):
+        if signature_re.search(signature):
+            return True
+        if sid_int is None:
+            return False
+        return sid_int in _actionable_sid_set()
+    # Safe default: legacy behavior
+    return bool(signature_re.search(signature))
+
+
+def _parse_subnets(raw: str):
+    subnets = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            subnets.append(ip_network(item, strict=False))
+        except ValueError:
+            continue
+    return subnets
+
+
+VPN_SUBNETS = _parse_subnets(VPN_SUBNETS_RAW)
+
+
+class Metrics:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.start_ts = int(time.time())
+        self.event_total = {}  # (user, reason, stage, result) -> int
+        self.last_event_ts = {}  # (user, reason) -> int
+        self.last_disconnect_by_user = {}
+        self.last_detect_counted_ts = {}  # (user, reason) -> int
+        self.last_action_by_key = {}  # (key, reason) -> int
+
+    def observe_detect(self, username: str, reason: str):
+        now = int(time.time())
+        user = username or "unknown"
+        why = reason or "unknown"
+        with self.lock:
+            # Always update last event timestamp (used in tuxedovpn_dpi_last_event_timestamp_seconds).
+            self.last_event_ts[(user, why)] = now
+
+            # Coalesce overly "noisy" Suricata streams: count at most once per (user, reason)
+            # within DETECT_DEDUP_SECONDS.
+            dedup = max(0, int(DETECT_DEDUP_SECONDS))
+            if dedup > 0:
+                last = int(self.last_detect_counted_ts.get((user, why), 0))
+                if now - last < dedup:
+                    return
+                self.last_detect_counted_ts[(user, why)] = now
+
+            k = (user, why, "detect", "match")
+            self.event_total[k] = self.event_total.get(k, 0) + 1
+
+    def observe_disconnect(self, username: str, reason: str, result: str):
+        user = username or "unknown"
+        why = reason or "unknown"
+        res = result or "unknown"
+        with self.lock:
+            k = (user, why, "disconnect", res)
+            self.event_total[k] = self.event_total.get(k, 0) + 1
+
+    def observe_webhook(self, username: str, reason: str, result: str):
+        user = username or "unknown"
+        why = reason or "unknown"
+        res = result or "unknown"
+        with self.lock:
+            k = (user, why, "webhook", res)
+            self.event_total[k] = self.event_total.get(k, 0) + 1
+
+    def can_disconnect(self, username: str) -> bool:
+        now = int(time.time())
+        key = username or "unknown"
+        with self.lock:
+            last = self.last_disconnect_by_user.get(key, 0)
+            if now - last < DISCONNECT_COOLDOWN_SECONDS:
+                return False
+            self.last_disconnect_by_user[key] = now
+            return True
+
+    def can_act(self, *, key: str, reason: str) -> bool:
+        now = int(time.time())
+        act_key = key or "unknown"
+        why = reason or "unknown"
+        cooldown = max(0, int(ACTION_COOLDOWN_SECONDS))
+        with self.lock:
+            last = int(self.last_action_by_key.get((act_key, why), 0))
+            if cooldown > 0 and now - last < cooldown:
+                return False
+            self.last_action_by_key[(act_key, why)] = now
+            return True
+
+    def render(self) -> str:
+        now = int(time.time())
+        lines = []
+        lines.append("# HELP tuxedovpn_dpi_uptime_seconds DPI agent uptime (seconds)")
+        lines.append("# TYPE tuxedovpn_dpi_uptime_seconds gauge")
+        lines.append('tuxedovpn_dpi_uptime_seconds{nodename="' + SAFE_NODE_NAME + '"} ' + str(now - self.start_ts))
+
+        lines.append("# HELP tuxedovpn_dpi_events_total DPI pipeline events by stage/result/reason")
+        lines.append("# TYPE tuxedovpn_dpi_events_total counter")
+        lines.append("# HELP tuxedovpn_dpi_last_event_timestamp_seconds Timestamp of the last DPI event per user and reason (seconds)")
+        lines.append("# TYPE tuxedovpn_dpi_last_event_timestamp_seconds gauge")
+
+        with self.lock:
+            for (user, why, stage, res), count in sorted(self.event_total.items()):
+                safe_user = str(user).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+                safe_why = str(why).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+                safe_stage = str(stage).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+                safe_res = str(res).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+                lines.append(
+                    'tuxedovpn_dpi_events_total{nodename="'
+                    + SAFE_NODE_NAME
+                    + '",user="'
+                    + safe_user
+                    + '",reason="'
+                    + safe_why
+                    + '",stage="'
+                    + safe_stage
+                    + '",result="'
+                    + safe_res
+                    + '"} '
+                    + str(count)
+                )
+            for (user, why), ts in sorted(self.last_event_ts.items()):
+                safe_user = str(user).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+                safe_why = str(why).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+                lines.append(
+                    'tuxedovpn_dpi_last_event_timestamp_seconds{nodename="'
+                    + SAFE_NODE_NAME
+                    + '",user="'
+                    + safe_user
+                    + '",reason="'
+                    + safe_why
+                    + '"} '
+                    + str(int(ts))
+                )
+
+        return "\n".join(lines) + "\n"
+
+
+metrics = Metrics()
+
+
+def _ip_in_vpn_subnets(value: str) -> bool:
+    if not VPN_SUBNETS:
+        return False
+    try:
+        addr = ip_address(value)
+    except ValueError:
+        return False
+    for net in VPN_SUBNETS:
+        if addr in net:
+            return True
+    return False
+
+
+def _occtl_sessions():
+    try:
+        result = subprocess.run(
+            [OCCTL_BIN, "--json", "show", "users"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    payload = (result.stdout or "").strip()
+    if not payload:
+        return []
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("users", "sessions", "items"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
+
+
+_occtl_cache = {"ts": 0.0, "sessions": []}
+_ip_user_cache = {}  # vpn_ip -> {"ts": float, "user": str}
+_IP_USER_CACHE_TTL_SECONDS = 120
+_block_lock = threading.Lock()
+_blocked_until_by_user = {}  # username -> epoch seconds
+_blocked_until_by_vpn_ip = {}  # vpn_ip -> epoch seconds
+_last_enforce_disconnect_by_user = {}  # username -> epoch seconds
+
+
+def _session_get(session: dict, *names):
+    if not isinstance(session, dict):
+        return None
+    lowered = {str(k).lower(): k for k in session.keys()}
+    for name in names:
+        key = lowered.get(str(name).lower())
+        if key is not None:
+            return session.get(key)
+    return None
+
+
+def _extract_ip(value):
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    s = s.split()[0]
+    if "/" in s:
+        s = s.split("/", 1)[0]
+    try:
+        ip_address(s)
+        return s
+    except ValueError:
+        return None
+
+
+def _resolve_username_by_vpn_ip(vpn_ip: str):
+    now = time.time()
+    if now - _occtl_cache["ts"] > 5:
+        _occtl_cache["sessions"] = _occtl_sessions()
+        _occtl_cache["ts"] = now
+    for session in _occtl_cache["sessions"]:
+        ip4 = _session_get(session, "IPv4", "ipv4", "ip", "ip4", "assigned_ip", "assigned-ip", "IPv4 Address")
+        if _extract_ip(ip4) == vpn_ip:
+            return _session_get(session, "Username", "User", "username", "user", "name")
+
+        # Fallback: search for any key containing "ip" and compare the normalized value.
+        if isinstance(session, dict):
+            for k, v in session.items():
+                if "ip" not in str(k).lower():
+                    continue
+                if _extract_ip(v) == vpn_ip:
+                    return _session_get(session, "Username", "User", "username", "user", "name")
+    return None
+
+
+def _disconnect_user(username: str, reason: str, *, force: bool = False) -> bool:
+    if not username:
+        return False
+    if not force and not metrics.can_disconnect(username):
+        metrics.observe_disconnect(username, reason, "cooldown")
+        _log_event("disconnect", {"stage": "disconnect", "user": username, "reason": reason, "result": "cooldown"})
+        return False
+    try:
+        result = subprocess.run(
+            [OCCTL_BIN, "disconnect", "user", username],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            _log(f"Disconnected user={username!r} via occtl")
+            metrics.observe_disconnect(username, reason, "success")
+            _log_event("disconnect", {"stage": "disconnect", "user": username, "reason": reason, "result": "success"})
+        else:
+            _log(
+                "Failed to disconnect user=%r via occtl (rc=%s, stderr=%r)"
+                % (username, result.returncode, (result.stderr or "").strip())
+            )
+            metrics.observe_disconnect(username, reason, "fail")
+            _log_event(
+                "disconnect",
+                {
+                    "stage": "disconnect",
+                    "user": username,
+                    "reason": reason,
+                    "result": "fail",
+                    "rc": int(result.returncode),
+                    "stderr": (result.stderr or "").strip(),
+                },
+            )
+        return result.returncode == 0
+    except Exception:
+        metrics.observe_disconnect(username, reason, "error")
+        _log_event("disconnect", {"stage": "disconnect", "user": username, "reason": reason, "result": "error"})
+        return False
+
+
+def _register_block(*, username: str | None, vpn_ip: str | None, until_epoch: int | None = None):
+    now = int(time.time())
+    until = int(until_epoch) if until_epoch is not None else (now + max(0, int(BLOCK_SECONDS)))
+    with _block_lock:
+        if username:
+            _blocked_until_by_user[username] = max(_blocked_until_by_user.get(username, 0), until)
+        elif vpn_ip:
+            ip_until = now + min(max(0, int(BLOCK_SECONDS)), max(0, int(IP_CORRELATION_SECONDS)))
+            _blocked_until_by_vpn_ip[vpn_ip] = max(_blocked_until_by_vpn_ip.get(vpn_ip, 0), ip_until)
+
+
+def _parse_utc_iso_to_epoch(value: str) -> int | None:
+    if not value:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _cleanup_blocks(now: int):
+    for d in (_blocked_until_by_user, _blocked_until_by_vpn_ip):
+        for k, v in list(d.items()):
+            if int(v) <= now:
+                d.pop(k, None)
+
+
+def enforce_blocks():
+    while True:
+        time.sleep(max(1, int(ENFORCE_POLL_SECONDS)))
+        now = int(time.time())
+        with _block_lock:
+            _cleanup_blocks(now)
+            blocked_users = {u for u, until in _blocked_until_by_user.items() if int(until) > now}
+            blocked_ips = {ip for ip, until in _blocked_until_by_vpn_ip.items() if int(until) > now}
+
+        if not blocked_users and not blocked_ips:
+            continue
+
+        for session in _occtl_sessions():
+            username = _session_get(session, "Username", "User", "username", "user", "name")
+            username = str(username).strip() if username is not None else ""
+            if not username:
+                continue
+
+            ip4 = _session_get(session, "IPv4", "ipv4", "ip", "ip4", "assigned_ip", "assigned-ip", "IPv4 Address")
+            ip4 = _extract_ip(ip4) or ""
+
+            should_kick = username in blocked_users or (ip4 and ip4 in blocked_ips)
+            if not should_kick:
+                continue
+
+            with _block_lock:
+                until = _blocked_until_by_user.get(username, 0) or (_blocked_until_by_vpn_ip.get(ip4, 0) if ip4 else 0)
+                last = int(_last_enforce_disconnect_by_user.get(username, 0))
+                if now - last < max(1, int(ENFORCE_MIN_INTERVAL_SECONDS)):
+                    continue
+                _last_enforce_disconnect_by_user[username] = now
+
+                # If we had only an IP block (couldn't resolve username earlier), promote it to a user-based block.
+                if ip4 and ip4 in _blocked_until_by_vpn_ip and username not in _blocked_until_by_user:
+                    promoted_until = max(int(_blocked_until_by_vpn_ip[ip4]), now + max(0, int(BLOCK_SECONDS)))
+                    _blocked_until_by_user[username] = max(_blocked_until_by_user.get(username, 0), promoted_until)
+                    _blocked_until_by_vpn_ip.pop(ip4, None)
+
+            _log(f"Enforcing block: disconnect user={username!r} ip={ip4!r} until={until}")
+            _disconnect_user(username, "enforce", force=True)
+
+
+def _send_mgmt_webhook(payload: dict, *, username: str, reason: str):
+    if not MGMT_WEBHOOK_URL:
+        return
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if MGMT_WEBHOOK_TOKEN:
+        headers["X-TuxedoVPN-Token"] = MGMT_WEBHOOK_TOKEN
+    req = Request(MGMT_WEBHOOK_URL, data=body, headers=headers, method="POST")
+    try:
+        with urlopen(req, timeout=5) as resp:
+            resp_body = resp.read()
+        metrics.observe_webhook(username, reason, "success")
+        _log_event("webhook", {"stage": "webhook", "user": username, "reason": reason, "result": "success"})
+        try:
+            data = json.loads((resp_body or b"").decode("utf-8", errors="ignore"))
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        resp_user = str(data.get("username") or "").strip()
+        resp_until = _parse_utc_iso_to_epoch(str(data.get("blocked_until_utc") or "").strip())
+        vpn_ip = str(payload.get("vpn_ip") or "").strip() or None
+        if resp_user:
+            _register_block(username=resp_user, vpn_ip=vpn_ip, until_epoch=resp_until)
+            if vpn_ip:
+                _ip_user_cache[vpn_ip] = {"ts": time.time(), "user": resp_user}
+                with _block_lock:
+                    _blocked_until_by_vpn_ip.pop(vpn_ip, None)
+    except HTTPError as e:
+        try:
+            detail = (e.read() or b"")[:256].decode("utf-8", errors="ignore").strip()
+        except Exception:
+            detail = ""
+        _log(f"Webhook failed: url={MGMT_WEBHOOK_URL!r} status={getattr(e, 'code', None)!r} body={detail!r}")
+        metrics.observe_webhook(username, reason, "fail")
+        _log_event(
+            "webhook",
+            {
+                "stage": "webhook",
+                "user": username,
+                "reason": reason,
+                "result": "fail",
+                "status": getattr(e, "code", None),
+                "body": detail,
+            },
+        )
+        return
+    except URLError as e:
+        _log(f"Webhook failed: url={MGMT_WEBHOOK_URL!r} err={getattr(e, 'reason', None)!r}")
+        metrics.observe_webhook(username, reason, "fail")
+        _log_event(
+            "webhook",
+            {"stage": "webhook", "user": username, "reason": reason, "result": "fail", "error": getattr(e, "reason", None)},
+        )
+        return
+
+
+def _event_reason(event_type: str, alert: dict, signature: str) -> str:
+    et = str(event_type or "").strip()
+    if et in ("alert", "drop"):
+        sid = (alert or {}).get("signature_id")
+        try:
+            sid_i = int(sid) if sid is not None else None
+        except (TypeError, ValueError):
+            sid_i = None
+        if sid_i is not None:
+            return "sid:" + str(sid_i)
+        sig = str(signature or "").strip()
+        if sig:
+            return "signature"
+        return "alert"
+    if et:
+        return "eve:" + et
+    return "unknown"
+
+
+def _process_eve_record(record: dict):
+    event_type = str(record.get("event_type") or "")
+    if EVE_EVENT_TYPES and event_type not in EVE_EVENT_TYPES:
+        return
+    alert = record.get("alert") or {}
+    signature = str(alert.get("signature") or "")
+    if event_type in ("alert", "drop"):
+        if not _matches_policy(alert):
+            return
+    else:
+        # protocol/flow events don't have SID/signature. Use event_type as a "strong" marker.
+        signature = "EVE:" + str(event_type)
+
+    src_ip = str(record.get("src_ip") or "")
+    dest_ip = str(record.get("dest_ip") or "")
+    vpn_ip = src_ip if _ip_in_vpn_subnets(src_ip) else (dest_ip if _ip_in_vpn_subnets(dest_ip) else "")
+    if not vpn_ip:
+        return
+
+    username = _resolve_username_by_vpn_ip(vpn_ip) if vpn_ip else None
+    if username:
+        _ip_user_cache[vpn_ip] = {"ts": time.time(), "user": str(username)}
+    else:
+        cached = _ip_user_cache.get(vpn_ip)
+        if cached and (time.time() - float(cached.get("ts", 0.0)) <= _IP_USER_CACHE_TTL_SECONDS):
+            username = cached.get("user") or None
+    reason = _event_reason(event_type, alert, signature)
+    metrics.observe_detect(username or "unknown", reason)
+
+    action_key = (str(username).strip() if username else "") or (("ip:" + vpn_ip) if vpn_ip else "unknown")
+    should_act = metrics.can_act(key=action_key, reason=reason)
+
+    _log(
+        "DPI hit: host=%s user=%r vpn_ip=%s sid=%r signature=%r mode=%s"
+        % (HOST, username, vpn_ip, alert.get("signature_id"), signature, MATCH_MODE)
+    )
+    _log_event(
+        "hit",
+        {
+            "host": HOST,
+            "stage": "detect",
+            "result": "match",
+            "user": username or "",
+            "vpn_ip": vpn_ip,
+            "event_type": event_type,
+            "reason": reason,
+            "sid": alert.get("signature_id"),
+            "signature": signature,
+            "mode": MATCH_MODE,
+        },
+    )
+
+    if username:
+        _register_block(username=username, vpn_ip=vpn_ip)
+        # Do not spam occtl/webhook for a single incident: act only when can_act() allows it,
+        # and also respect the disconnect cooldown.
+        if should_act and metrics.can_disconnect(str(username)):
+            _disconnect_user(str(username), reason, force=True)
+    else:
+        _register_block(username=None, vpn_ip=vpn_ip)
+
+    if should_act:
+        _send_mgmt_webhook(
+            {
+                "host": os.environ.get("HOSTNAME", ""),
+                "username": username or "",
+                "vpn_ip": vpn_ip,
+                "signature": signature,
+                "sid": alert.get("signature_id"),
+                "severity": alert.get("severity"),
+                "ts": record.get("timestamp") or "",
+            },
+            username=(username or "unknown"),
+            reason=reason,
+        )
+
+
+def tail_eve():
+    offset = None
+    while True:
+        try:
+            if offset is None:
+                offset = os.path.getsize(EVE_FILE)
+            with open(EVE_FILE, "r", encoding="utf-8", errors="ignore") as f:
+                try:
+                    size = os.fstat(f.fileno()).st_size
+                except Exception:
+                    size = None
+                if size is not None and offset > size:
+                    offset = 0
+                f.seek(offset)
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    _process_eve_record(rec)
+                offset = f.tell()
+        except FileNotFoundError:
+            pass
+        time.sleep(1)
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.rstrip("/") != METRICS_PATH.rstrip("/"):
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found\n")
+            return
+        payload = metrics.render().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, fmt, *args):
+        return
+
+
+def main():
+    _log(
+        "Started. EVE_FILE=%r VPN_SUBNETS=%r MATCH_MODE=%r RULESET_PATH=%r EVE_EVENT_TYPES=%r BLOCK_SECONDS=%r"
+        % (EVE_FILE, VPN_SUBNETS_RAW, MATCH_MODE, RULESET_PATH, sorted(EVE_EVENT_TYPES), BLOCK_SECONDS)
+    )
+    t = threading.Thread(target=tail_eve, daemon=True)
+    t.start()
+    t2 = threading.Thread(target=enforce_blocks, daemon=True)
+    t2.start()
+    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

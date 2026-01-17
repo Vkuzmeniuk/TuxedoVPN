@@ -1,0 +1,118 @@
+# {{ common_vpn_before_rules_marker }}
+#
+# rules.before
+#
+# Rules that must be applied before rules added via the ufw CLI.
+# Put custom rules into one of these chains:
+#   ufw-before-input
+#   ufw-before-output
+#   ufw-before-forward
+#
+
+# Do not remove these mandatory lines, otherwise ufw will break
+*filter
+:ufw-before-input - [0:0]
+:ufw-before-output - [0:0]
+:ufw-before-forward - [0:0]
+:ufw-user-forward - [0:0]
+:ufw-not-local - [0:0]
+# End of mandatory lines
+
+
+# Allow all loopback traffic
+-A ufw-before-input -i lo -j ACCEPT
+-A ufw-before-output -o lo -j ACCEPT
+
+# Allow SSH before other rules
+{% if common_vpn_allow_early_ssh %}
+-A ufw-before-input -p tcp --dport {{ ssh_port | default(22) }} -j ACCEPT
+-A ufw-before-output -p tcp --sport {{ ssh_port | default(22) }} -j ACCEPT
+{% endif %}
+
+# Allow DNS
+{% if common_vpn_allow_dns %}
+-A ufw-before-input -p udp --sport 53 -j ACCEPT
+-A ufw-before-output -p udp --dport 53 -j ACCEPT
+{% endif %}
+
+# Allow NTP
+{% if common_vpn_allow_ntp %}
+-A ufw-before-output -p udp --dport 123 -j ACCEPT
+{% endif %}
+
+# Fast-path packets that belong to an existing connection
+-A ufw-before-input -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A ufw-before-output -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A ufw-before-forward -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# Drop INVALID packets (logged at loglevel medium and above)
+-A ufw-before-input -m conntrack --ctstate INVALID -j ufw-logging-deny
+-A ufw-before-input -m conntrack --ctstate INVALID -j DROP
+
+# Allowed ICMP types for INPUT
+-A ufw-before-input -p icmp --icmp-type destination-unreachable -j ACCEPT
+-A ufw-before-input -p icmp --icmp-type time-exceeded -j ACCEPT
+-A ufw-before-input -p icmp --icmp-type parameter-problem -j ACCEPT
+-A ufw-before-input -p icmp --icmp-type echo-request -j ACCEPT
+
+# Allowed ICMP types for FORWARD
+-A ufw-before-forward -p icmp --icmp-type destination-unreachable -j ACCEPT
+-A ufw-before-forward -p icmp --icmp-type time-exceeded -j ACCEPT
+-A ufw-before-forward -p icmp --icmp-type parameter-problem -j ACCEPT
+-A ufw-before-forward -p icmp --icmp-type echo-request -j ACCEPT
+
+# Allow DHCP client traffic
+-A ufw-before-input -p udp --sport 67 --dport 68 -j ACCEPT
+
+# Allow forwarding for trusted networks
+{% for net in common_vpn_forward_extra_subnets | default([]) %}
+-A ufw-before-forward -s {{ net }} -j ACCEPT
+-A ufw-before-forward -d {{ net }} -j ACCEPT
+{% endfor %}
+{% for net in common_vpn_forward_extra_subnets6 | default([]) %}
+-A ufw-before-forward -s {{ net }} -j ACCEPT
+-A ufw-before-forward -d {{ net }} -j ACCEPT
+{% endfor %}
+
+#
+# ufw-not-local
+#
+-A ufw-before-input -j ufw-not-local
+
+# If LOCAL — RETURN
+-A ufw-not-local -m addrtype --dst-type LOCAL -j RETURN
+
+# If MULTICAST — RETURN
+-A ufw-not-local -m addrtype --dst-type MULTICAST -j RETURN
+
+# If BROADCAST — RETURN
+-A ufw-not-local -m addrtype --dst-type BROADCAST -j RETURN
+
+# Drop all other non-local packets
+-A ufw-not-local -m limit --limit 3/min --limit-burst 10 -j ufw-logging-deny
+-A ufw-not-local -j DROP
+
+# Allow MULTICAST mDNS for service discovery (make sure the MULTICAST rule above is not commented out)
+{% if common_vpn_allow_mdns %}
+-A ufw-before-input -p udp -d 224.0.0.251 --dport 5353 -j ACCEPT
+{% endif %}
+
+# Allow MULTICAST UPnP for service discovery (make sure the MULTICAST rule above is not commented out)
+{% if common_vpn_allow_upnp %}
+-A ufw-before-input -p udp -d 239.255.255.250 --dport 1900 -j ACCEPT
+{% endif %}
+
+-A ufw-before-forward -j ufw-user-forward
+
+# Do not remove the 'COMMIT' line, otherwise rules won't be applied
+COMMIT
+
+# NAT table rules
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+
+# Each table must end with a 'COMMIT' line
+COMMIT

@@ -1,0 +1,90 @@
+---
+# Post-deploy self-tests for the DPI chain:
+# UFW mangle (NFQUEUE) -> Suricata (inline) -> EVE -> DPI agent -> occtl disconnect
+
+- name: Self-test | Ensure VPN client subnets are known (HOME_NET)
+  ansible.builtin.assert:
+    that:
+      - (dpi_suricata_home_nets_effective | default([]) | length) > 0
+    fail_msg: >-
+      DPI is enabled but no VPN client subnets were derived for HOME_NET/VPN_SUBNETS.
+      Set `vpn_nat_subnets` or `vpn_ipv4_network`/`vpn_ipv4_prefix_length`, or override `dpi_suricata_home_nets`.
+  when: (dpi_suricata_enable | default(false) | bool) or (dpi_agent_enable | default(false) | bool)
+
+- name: Self-test | Verify NFQUEUE hook exists in mangle/FORWARD (iptables)
+  ansible.builtin.command:
+    argv: ["iptables", "-t", "mangle", "-S", "FORWARD"]
+  register: _dpi_selftest_mangle_forward
+  changed_when: false
+  failed_when: >-
+    (dpi_require_nfqueue | default(false) | bool)
+    and (
+      (_dpi_selftest_mangle_forward.rc | default(1) | int) != 0
+      or (
+        (_dpi_selftest_mangle_forward.stdout | default(''))
+        | regex_search('(?m)^-A FORWARD .* -j NFQUEUE .*--queue-num\\s+' ~ (dpi_suricata_queue_num_effective | int))
+      ) is none
+    )
+  when: dpi_suricata_enable | default(false) | bool
+
+- name: Self-test | Verify Suricata command socket exists (live mode indicator)
+  ansible.builtin.stat:
+    path: /var/run/suricata-command.socket
+  register: _dpi_selftest_suricata_sock
+  changed_when: false
+  failed_when: (dpi_suricata_enable | default(false) | bool) and not (_dpi_selftest_suricata_sock.stat.exists | default(false))
+
+- name: Self-test | Verify ruleset contains local BitTorrent SIDs
+  ansible.builtin.command:
+    argv: ["grep", "-qE", "sid:(9900001|9900002);", "{{ dpi_suricata_rule_dest }}"]
+  register: _dpi_selftest_rules_local_sids
+  changed_when: false
+  failed_when: (dpi_suricata_enable | default(false) | bool) and (_dpi_selftest_rules_local_sids.rc | default(1) | int) != 0
+
+- name: Self-test | Ensure ruleset exists when agent matches by ruleset SIDs
+  ansible.builtin.stat:
+    path: "{{ dpi_agent_ruleset_path | default(dpi_suricata_rule_dest) }}"
+  register: _dpi_selftest_agent_ruleset_stat
+  changed_when: false
+  failed_when: >-
+    (dpi_agent_enable | default(false) | bool)
+    and ((dpi_agent_match_mode | default('ruleset')) in ['ruleset','sid','sids','both','any'])
+    and not (_dpi_selftest_agent_ruleset_stat.stat.exists | default(false))
+
+- name: Self-test | Validate SIGNATURE_MATCH_REGEX compiles (agent)
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - "import re,sys; re.compile(sys.argv[1])"
+      - "{{ dpi_agent_signature_match_regex }}"
+  changed_when: false
+  when:
+    - dpi_agent_enable | default(false) | bool
+    - (dpi_agent_match_mode | default('ruleset')) in ['regex','both','any']
+
+- name: Self-test | Verify occtl returns JSON (agent dependency)
+  ansible.builtin.command:
+    argv: ["{{ dpi_occtl_path }}", "--json", "show", "users"]
+  register: _dpi_selftest_occtl_users
+  changed_when: false
+  failed_when: >-
+    (dpi_agent_enable | default(false) | bool)
+    and (
+      (_dpi_selftest_occtl_users.rc | default(1) | int) != 0
+      or ((_dpi_selftest_occtl_users.stdout | default('') | trim | length) == 0)
+    )
+  when: dpi_agent_enable | default(false) | bool
+
+- name: Self-test | Parse occtl JSON output (agent dependency)
+  ansible.builtin.set_fact:
+    _dpi_selftest_occtl_users_parsed: "{{ _dpi_selftest_occtl_users.stdout | from_json }}"
+  changed_when: false
+  when: dpi_agent_enable | default(false) | bool
+
+- name: Self-test | Ensure agent has at least one EVE event_type to watch
+  ansible.builtin.assert:
+    that:
+      - (dpi_agent_eve_event_types | default([]) | length) > 0
+    fail_msg: "dpi_agent_eve_event_types is empty; agent would ignore all EVE events."
+  when: dpi_agent_enable | default(false) | bool

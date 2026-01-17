@@ -1,0 +1,8 @@
+# Managed by Ansible (role: common)
+[sshd]
+enabled = true
+port = {{ ssh_port }}
+maxretry = 5
+findtime = 10m
+bantime = 1h
+banaction = {{ common_fail2ban_banaction | default('iptables-multiport') }}

@@ -1,0 +1,15 @@
+PasswordAuthentication no
+PermitRootLogin no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+X11Forwarding no
+MaxAuthTries 3
+LoginGraceTime 20
+UsePAM yes
+
+Protocol 2
+
+# Allow password login only for user support
+Match User support
+    PasswordAuthentication yes
+    PubkeyAuthentication yes

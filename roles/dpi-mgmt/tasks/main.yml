@@ -1,0 +1,260 @@
+---
+- name: Ensure DPI blocker prerequisites are present
+  ansible.builtin.package:
+    name:
+      - python3
+      - python3-psycopg2
+    state: present
+
+- name: Create tuxedovpn config directory
+  ansible.builtin.file:
+    path: /etc/tuxedovpn
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Check DPI webhook token file presence (mgmt)
+  ansible.builtin.stat:
+    path: "{{ dpi_mgmt_webhook_token_path }}"
+  register: _dpi_mgmt_token_stat
+  changed_when: false
+
+- name: Generate DPI webhook token on mgmt when missing
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    python3 - <<'PY' > "{{ dpi_mgmt_webhook_token_path }}"
+    import secrets
+    print(secrets.token_urlsafe(32))
+    PY
+  args:
+    executable: /bin/bash
+  when:
+    - (dpi_mgmt_webhook_token | default('') | trim | length) == 0
+    - not (_dpi_mgmt_token_stat.stat.exists | default(false))
+  no_log: true
+
+- name: Read effective DPI webhook token from file (mgmt)
+  ansible.builtin.slurp:
+    path: "{{ dpi_mgmt_webhook_token_path }}"
+  register: _dpi_mgmt_token_slurp
+  when: (dpi_mgmt_webhook_token | default('') | trim | length) == 0
+  no_log: true
+
+- name: Set effective DPI webhook token fact (mgmt)
+  ansible.builtin.set_fact:
+    dpi_mgmt_webhook_token_effective: >-
+      {{
+        (dpi_mgmt_webhook_token | trim)
+        if (dpi_mgmt_webhook_token | default('') | trim | length) > 0
+        else ((_dpi_mgmt_token_slurp.content | b64decode | trim) if (_dpi_mgmt_token_slurp is defined and _dpi_mgmt_token_slurp.content is defined) else '')
+      }}
+  no_log: true
+
+- name: Ensure effective DPI webhook token is available (mgmt)
+  ansible.builtin.assert:
+    that:
+      - (dpi_mgmt_webhook_token_effective | default('') | trim | length) > 0
+    fail_msg: >-
+      Unable to determine dpi_mgmt_webhook_token_effective.
+      Provide vault_dpi_webhook_token or ensure {{ dpi_mgmt_webhook_token_path }} is readable on mgmt.
+  no_log: true
+
+- name: Validate DPI blocker DB password is provided
+  ansible.builtin.assert:
+    that:
+      - (dpi_db_password | default('') | trim) | length > 0
+    fail_msg: >-
+      freeradius_db_password is empty; required for dpi-mgmt to update vpn_user_blocklist.
+      Set vault_freeradius_db_password in `group_vars/all/vault.yml`.
+  no_log: true
+
+- name: Install tuxedovpn DPI blocker env file
+  ansible.builtin.template:
+    src: tuxedovpn-dpi-blocker.env.j2
+    dest: /etc/tuxedovpn/dpi-blocker.env
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart tuxedovpn DPI blocker
+  no_log: true
+
+- name: Install tuxedovpn DPI blocker script
+  ansible.builtin.template:
+    src: tuxedovpn-dpi-blocker.py.j2
+    dest: /usr/local/bin/tuxedovpn-dpi-blocker.py
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart tuxedovpn DPI blocker
+
+- name: Install tuxedovpn DPI blocker systemd unit
+  ansible.builtin.template:
+    src: tuxedovpn-dpi-blocker.service.j2
+    dest: /etc/systemd/system/tuxedovpn-dpi-blocker.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart tuxedovpn DPI blocker
+
+- name: Allow DPI webhook from VPN WireGuard IPs only (UFW, mgmt)
+  become: true
+  vars:
+    _dpi_vpn_wg_ips: >-
+      {{
+        (mgmt_wireguard_vpn_peers | default([]))
+        | map(attribute='wg_ip')
+        | select('defined')
+        | map('trim')
+        | select('match', '^\\d+\\.\\d+\\.\\d+\\.\\d+$')
+        | list
+        | unique
+      }}
+    _dpi_vpn_wg_ips_fallback: >-
+      {{
+        (groups['vpn'] | default([]))
+        | map('extract', hostvars, 'mgmt_wireguard_wireguard_ip')
+        | select('defined')
+        | map('trim')
+        | select('match', '^\\d+\\.\\d+\\.\\d+\\.\\d+$')
+        | list
+        | unique
+      }}
+    _dpi_allowed_sources: "{{ (_dpi_vpn_wg_ips if (_dpi_vpn_wg_ips | length) > 0 else _dpi_vpn_wg_ips_fallback) }}"
+    _dpi_wg_prefix: "{{ (mgmt_wireguard_address_mgmt | default('10.202.0.1/24') | string).split('/') | last }}"
+    _dpi_wg_mgmt_ip: "{{ (mgmt_wireguard_address_mgmt | default('10.202.0.1/24') | regex_replace('/.*$', '') | trim) }}"
+    _dpi_wg_cidr_fallback: "{{ (_dpi_wg_mgmt_ip | regex_replace('\\.\\d+$', '.0')) ~ '/' ~ _dpi_wg_prefix }}"
+  block:
+    - name: Remove broad DPI webhook allow rule (legacy cleanup)
+      community.general.ufw:
+        rule: allow
+        port: "{{ dpi_mgmt_listen_port | int }}"
+        proto: tcp
+        direction: in
+        delete: true
+      when: (_dpi_allowed_sources | default([]) | length) > 0 or (dpi_mgmt_allow_wg_subnet_fallback | default(true) | bool)
+
+    - name: Allow DPI webhook from VPN peers on wg-mgmt
+      community.general.ufw:
+        rule: allow
+        port: "{{ dpi_mgmt_listen_port | int }}"
+        proto: tcp
+        direction: in
+        interface: "{{ mgmt_wireguard_interface }}"
+        src: "{{ item }}"
+      loop: "{{ _dpi_allowed_sources | default([]) }}"
+      when: (_dpi_allowed_sources | default([]) | length) > 0
+
+    - name: Allow DPI webhook from WireGuard subnet fallback (wg-mgmt)
+      community.general.ufw:
+        rule: allow
+        port: "{{ dpi_mgmt_listen_port | int }}"
+        proto: tcp
+        direction: in
+        interface: "{{ mgmt_wireguard_interface }}"
+        src: "{{ _dpi_wg_cidr_fallback }}"
+      when:
+        - (dpi_mgmt_allow_wg_subnet_fallback | default(true) | bool)
+        - (_dpi_allowed_sources | default([]) | length) == 0
+
+    - name: Fail when DPI webhook allowed sources cannot be derived and fallback is disabled
+      ansible.builtin.assert:
+        that:
+          - (_dpi_allowed_sources | default([]) | length) > 0
+        fail_msg: >-
+          Unable to derive VPN WireGuard peer IPs for DPI webhook firewall allow-list on {{ inventory_hostname }}.
+          Either run mgmt-wireguard against both `mgmt` and `vpn` groups, set per-host `mgmt_wireguard_wireguard_address`,
+          or enable `dpi_mgmt_allow_wg_subnet_fallback=true`.
+      when:
+        - not (dpi_mgmt_allow_wg_subnet_fallback | default(true) | bool)
+        - (_dpi_allowed_sources | default([]) | length) == 0
+
+- name: Ensure tuxedovpn DPI blocker is enabled and running
+  ansible.builtin.systemd:
+    name: tuxedovpn-dpi-blocker.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: dpi_mgmt_enable | bool
+
+- name: Flush DPI blocker restarts before self-test
+  ansible.builtin.meta: flush_handlers
+  when:
+    - dpi_mgmt_enable | bool
+    - dpi_mgmt_selftest_enable | default(true) | bool
+
+- name: Self-test | Verify DPI blocker inserts active blocklist rows
+  when:
+    - dpi_mgmt_enable | bool
+    - dpi_mgmt_selftest_enable | default(true) | bool
+  block:
+    - name: Self-test | Post local webhook event
+      ansible.builtin.uri:
+        url: "http://{{ dpi_mgmt_listen_ip }}:{{ dpi_mgmt_listen_port | int }}/event"
+        method: POST
+        headers:
+          Content-Type: application/json
+          X-TuxedoVPN-Token: "{{ dpi_mgmt_webhook_token_effective }}"
+        body_format: json
+        body:
+          host: "{{ inventory_hostname }}"
+          username: "{{ dpi_mgmt_selftest_username }}"
+          vpn_ip: "{{ dpi_mgmt_selftest_vpn_ip }}"
+          signature: "SELFTEST"
+          ts: "ansible-selftest"
+        status_code: 200
+      register: dpi_mgmt_selftest_webhook
+      changed_when: false
+      no_log: true
+
+    - name: Self-test | Capture webhook response fields
+      ansible.builtin.set_fact:
+        dpi_mgmt_selftest_response_username: "{{ dpi_mgmt_selftest_webhook.json.username | default('') | string }}"
+        dpi_mgmt_selftest_response_blocked_until_utc: "{{ dpi_mgmt_selftest_webhook.json.blocked_until_utc | default('') | string }}"
+      changed_when: false
+
+    - name: Self-test | Read selftest row details from vpn_user_blocklist
+      ansible.builtin.command: >
+        psql -d {{ dpi_db_name }} -tAc
+        "SELECT
+           COALESCE(username,'') || '|' ||
+           COALESCE(expires_at::text,'') || '|' ||
+           NOW()::text || '|' ||
+           COALESCE(EXTRACT(EPOCH FROM (expires_at - NOW()))::bigint::text,'')
+         FROM vpn_user_blocklist
+         WHERE username = '{{ dpi_mgmt_selftest_username }}'
+         LIMIT 1;"
+      become_user: postgres
+      register: dpi_mgmt_selftest_row
+      changed_when: false
+
+    - name: Self-test | Ensure selftest row is active in vpn_user_blocklist
+      ansible.builtin.command: >
+        psql -d {{ dpi_db_name }} -tAc
+        "SELECT CASE
+            WHEN EXISTS(
+              SELECT 1 FROM vpn_user_blocklist
+              WHERE username = '{{ dpi_mgmt_selftest_username }}'
+                AND expires_at > NOW()
+            ) THEN 1 ELSE 0 END;"
+      become_user: postgres
+      register: dpi_mgmt_selftest_db
+      changed_when: false
+      failed_when: (dpi_mgmt_selftest_db.stdout | default('') | trim) != '1'
+  rescue:
+    - name: Self-test | Show webhook + DB row diagnostics
+      ansible.builtin.fail:
+        msg: >-
+          DPI blocker self-test failed.
+          webhook_username={{ dpi_mgmt_selftest_response_username | default('') | trim }}
+          webhook_blocked_until_utc={{ dpi_mgmt_selftest_response_blocked_until_utc | default('') | trim }}
+          db_row={{ dpi_mgmt_selftest_row.stdout | default('') | trim }}
+  always:
+    - name: Self-test | Cleanup selftest blocklist row
+      ansible.builtin.command: >
+        psql -d {{ dpi_db_name }} -v ON_ERROR_STOP=1 -c
+        "DELETE FROM vpn_user_blocklist WHERE username = '{{ dpi_mgmt_selftest_username }}';"
+      become_user: postgres
+      changed_when: false
+      failed_when: false

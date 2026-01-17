@@ -1,0 +1,9 @@
+# Managed by Ansible (role: common-vpn)
+#
+# Tries to match typical ocserv authentication errors and extract the client IP.
+#
+[Definition]
+failregex =
+    ^.*\\b<HOST>\\b.*\\b(?:authentication failed|auth failed|login failed|failed authentication|invalid password|wrong password)\\b.*$
+    ^.*\\b(?:authentication failed|auth failed|login failed|failed authentication|invalid password|wrong password)\\b.*\\b<HOST>\\b.*$
+ignoreregex =

@@ -1,0 +1,62 @@
+---
+- hosts: all
+  remote_user: "{{ admin_user | default('support') }}"
+  become: true
+  pre_tasks:
+    - name: Preflight | Ensure shared secrets are set (no placeholders)
+      ansible.builtin.assert:
+        that:
+          - (radius_shared_secret | default('') | string | trim) | length > 0
+          - (radius_shared_secret | string | trim) != "change_me_radius_secret"
+        fail_msg: >-
+          radius_shared_secret is not set (or still set to the placeholder).
+          Put vault_radius_shared_secret into group_vars/all/vault.yml (template: group_vars/all/__vault_template.yml).
+      become: false
+      no_log: true
+  roles:
+    - common
+    - { role: monitoring, tags: ["node_exporter"], vars: { mode: "node" } }
+
+- hosts: mgmt:vpn
+  remote_user: "{{ admin_user | default('support') }}"
+  become: true
+  roles:
+    - { role: mgmt-wireguard, tags: ["mgmt-wireguard"] }
+
+- hosts: mgmt
+  become: true
+  pre_tasks:
+    - name: Preflight | Ensure mgmt secrets are set (no placeholders)
+      ansible.builtin.assert:
+        that:
+          - (freeradius_db_password | default('') | string | trim) | length > 0
+          - (freeradius_db_password | string | trim) != "change_me_radius_db"
+          - (grafana_admin_password | default('') | string | trim) | length > 0
+          - (pihole_admin_password | default('') | string | trim) | length > 0
+        fail_msg: >-
+          Missing/placeholder mgmt secrets.
+          Set vault_freeradius_db_password in group_vars/all/vault.yml and grafana_admin_password/pihole_admin_password
+          in group_vars/mgmt/vault.yml (templates exist under group_vars/*/__vault_template.yml).
+      become: false
+      no_log: true
+  roles:
+    - {
+        role: monitoring,
+        tags: ["prometheus_server", "monitoring_server", "node_exporter"],
+        vars: { mode: "server" },
+      }
+    - { role: freeradius, tags: ["freeradius"] }
+    - { role: dpi-mgmt, tags: ["dpi_mgmt"] }
+    - { role: private-vpn, tags: ["private_vpn"] }
+    - { role: pihole, tags: ["pihole"] }
+    - { role: radius-pihole-sync, tags: ["radius_pihole_sync"] }
+    - { role: mgmt-reverse-proxy, tags: ["mgmt_reverse_proxy"] }
+    - { role: tuxedo-cli, tags: ["tuxedo_cli"] }
+  remote_user: "{{ admin_user | default('support') }}"
+
+- hosts: vpn
+  remote_user: "{{ admin_user | default('support') }}"
+  become: true
+  roles:
+    - { role: public-vpn, tags: ["public_vpn"] }
+    - { role: dpi, tags: ["dpi"] }

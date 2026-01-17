@@ -1,0 +1,71 @@
+---
+- name: Build effective VPN sysctl settings
+  ansible.builtin.set_fact:
+    _common_vpn_sysctl_settings: "{{ common_vpn_sysctl_defaults | combine(common_vpn_sysctl_overrides | default({})) }}"
+  when: common_vpn_sysctl_enable | default(false) | bool
+
+- name: Build sysctl config candidate list
+  ansible.builtin.set_fact:
+    _common_vpn_sysctl_candidates: >-
+      {{
+        (
+          ([common_vpn_sysctl_config_path]
+           if (common_vpn_sysctl_config_path | default('') | trim | length) > 0 else [])
+          + (common_vpn_sysctl_config_candidates | default(['/etc/sysctl.d/60-common-vpn.conf', '/etc/sysctl.conf']))
+        ) | unique
+      }}
+  when: common_vpn_sysctl_enable | default(false) | bool
+
+- name: Check sysctl candidate directories
+  ansible.builtin.stat:
+    path: "{{ item | dirname }}"
+  loop: "{{ _common_vpn_sysctl_candidates | default([]) }}"
+  register: _common_vpn_sysctl_candidate_stats
+  loop_control:
+    label: "{{ item }}"
+  when: common_vpn_sysctl_enable | default(false) | bool
+
+- name: Select sysctl config path
+  ansible.builtin.set_fact:
+    _common_vpn_sysctl_config_path: >-
+      {{
+        (_common_vpn_sysctl_candidate_stats.results
+         | selectattr('stat.isdir')
+         | map(attribute='item')
+         | list
+         | first)
+        | default(_common_vpn_sysctl_candidates | first)
+      }}
+  when: common_vpn_sysctl_enable | default(false) | bool
+
+- name: Ensure sysctl config directory exists
+  ansible.builtin.file:
+    path: "{{ _common_vpn_sysctl_config_path | dirname }}"
+    state: directory
+    mode: '0755'
+  when:
+    - common_vpn_sysctl_enable | default(false) | bool
+    - not (
+        (_common_vpn_sysctl_candidate_stats.results | default([]))
+        | selectattr('item', 'equalto', _common_vpn_sysctl_config_path)
+        | map(attribute='stat.exists')
+        | list
+        | first
+        | default(false)
+      )
+
+- name: Expose effective sysctl config path
+  ansible.builtin.set_fact:
+    common_vpn_sysctl_config_path_effective: "{{ _common_vpn_sysctl_config_path }}"
+  when: common_vpn_sysctl_enable | default(false) | bool
+
+- name: Apply VPN sysctl tuning
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: "{{ _common_vpn_sysctl_config_path }}"
+    sysctl_set: true
+    state: present
+  loop: "{{ _common_vpn_sysctl_settings | default({}) | dict2items }}"
+  when:
+    - common_vpn_sysctl_enable | default(false) | bool

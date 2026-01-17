@@ -1,0 +1,73 @@
+---
+- name: Stop apt timers during play (reduce lock contention)
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+  when: apt_disable_auto_updates_during_run | default(true) | bool
+  changed_when: false
+  failed_when: false
+
+- name: Wait for apt/dpkg locks to clear
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    timeout="{{ apt_wait_timeout | default(120) | int }}"
+    poll="{{ apt_wait_poll_interval | default(5) | int }}"
+    report="{{ apt_wait_report_interval | default(30) | int }}"
+
+    end=$((SECONDS+timeout))
+    next_report=$SECONDS
+
+    lock_files=(
+      /var/lib/dpkg/lock-frontend
+      /var/lib/dpkg/lock
+      /var/lib/apt/lists/lock
+      /var/cache/apt/archives/lock
+    )
+
+    locked() {
+      for f in "${lock_files[@]}"; do
+        if fuser -s "$f" 2>/dev/null; then
+          return 0
+        fi
+      done
+      return 1
+    }
+
+    while [ $SECONDS -lt $end ]; do
+      if ! locked; then
+        exit 0
+      fi
+
+      if [ $SECONDS -ge $next_report ]; then
+        echo "apt/dpkg locks are held; waiting..."
+        for f in "${lock_files[@]}"; do
+          pids="$(fuser "$f" 2>/dev/null || true)"
+          if [ -n "${pids// /}" ]; then
+            echo "  $f -> $pids"
+            ps -o pid,etime,cmd -p $pids 2>/dev/null || true
+          fi
+        done
+        next_report=$((SECONDS+report))
+      fi
+
+      sleep "$poll"
+    done
+
+    # Do not fail here: apt tasks also have lock_timeout and can keep waiting.
+    exit 0
+  args:
+    executable: /bin/bash
+  register: apt_wait_result
+  changed_when: false
+  failed_when: false
+
+- name: Show apt lock wait status (debug)
+  ansible.builtin.debug:
+    var: apt_wait_result.stdout_lines
+  when:
+    - apt_wait_result.stdout_lines is defined
+    - apt_wait_result.stdout_lines | length > 0

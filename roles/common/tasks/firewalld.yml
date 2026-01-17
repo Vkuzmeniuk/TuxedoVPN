@@ -1,0 +1,64 @@
+---
+# backend firewalld (CentOS/RHEL).
+# Uses ufw_extra_rules as a common source of inbound allowlist rules.
+
+- name: Ensure firewalld is installed
+  ansible.builtin.package:
+    name: firewalld
+    state: present
+  tags: ['firewalld']
+
+- name: Ensure firewalld is enabled and running
+  ansible.builtin.service:
+    name: firewalld
+    state: started
+    enabled: true
+  tags: ['firewalld']
+
+- name: Allow SSH (firewalld)
+  ansible.posix.firewalld:
+    zone: "{{ common_firewalld_zone }}"
+    port: "{{ ssh_port }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  when: manage_ssh | default(true) | bool
+  tags: ['firewalld']
+
+- name: Allow inbound firewall ports without source restriction (firewalld)
+  ansible.posix.firewalld:
+    zone: "{{ common_firewalld_zone }}"
+    port: "{{ (item.port | string) ~ '/' ~ (item.proto | default('tcp')) }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ common_firewall_rules_effective | default(ufw_extra_rules | default([])) }}"
+  when:
+    - (item.direction | default('in')) == 'in'
+    - (item.action | default('allow')) == 'allow'
+    - not (item.route | default(false) | bool)
+    - (item.src | default('') | trim) == ''
+  loop_control:
+    label: "{{ item.port }}/{{ item.proto | default('tcp') }}"
+  tags: ['firewalld']
+
+- name: Allow inbound firewall ports with source restriction (firewalld rich rules)
+  ansible.posix.firewalld:
+    zone: "{{ common_firewalld_zone }}"
+    rich_rule: >-
+      rule family="ipv4"
+      source address="{{ item.src | trim }}"
+      port port="{{ item.port | string }}" protocol="{{ item.proto | default('tcp') }}"
+      accept
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ common_firewall_rules_effective | default(ufw_extra_rules | default([])) }}"
+  when:
+    - (item.direction | default('in')) == 'in'
+    - (item.action | default('allow')) == 'allow'
+    - not (item.route | default(false) | bool)
+    - (item.src | default('') | trim) != ''
+  loop_control:
+    label: "{{ item.src | trim }} -> {{ item.port }}/{{ item.proto | default('tcp') }}"
+  tags: ['firewalld']

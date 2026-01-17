@@ -1,0 +1,88 @@
+---
+# Expose the local rlm_prometheus listener via an nginx TLS/mTLS reverse proxy.
+
+- name: Derive nginx listen IP for FreeRADIUS Prometheus proxy
+  ansible.builtin.set_fact:
+    freeradius_prometheus_proxy_listen_ip_effective: >-
+      {{
+        (freeradius_prometheus_proxy_listen_ip | default('') | trim)
+        | default(ansible_default_ipv4.address | default(ansible_host | default('')), true)
+      }}
+
+- name: Validate nginx listen IP for FreeRADIUS Prometheus proxy
+  ansible.builtin.assert:
+    that:
+      - freeradius_prometheus_proxy_listen_ip_effective | default('') | trim | length > 0
+      - freeradius_prometheus_proxy_listen_ip_effective | trim not in ['0.0.0.0', '127.0.0.1']
+    fail_msg: >-
+      freeradius_prometheus_proxy_listen_ip_effective resolved to "{{ freeradius_prometheus_proxy_listen_ip_effective | default('') }}".
+      Set freeradius_prometheus_proxy_listen_ip to a non-loopback IP to avoid a port bind conflict with
+      rlm_prometheus (which listens on {{ freeradius_prometheus_listen_ip }}:{{ freeradius_prometheus_listen_port }}).
+
+- name: Ensure nginx is installed
+  ansible.builtin.package:
+    name: nginx
+    state: present
+
+- name: Ensure metrics PKI directory exists
+  ansible.builtin.file:
+    path: "{{ freeradius_prometheus_proxy_tls_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: freeradius_prometheus_proxy_tls_enable | bool
+
+- name: Validate FreeRADIUS Prometheus proxy TLS files exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _freeradius_prometheus_proxy_tls_stat
+  loop:
+    - "{{ freeradius_prometheus_proxy_tls_cert_file }}"
+    - "{{ freeradius_prometheus_proxy_tls_key_file }}"
+  when: freeradius_prometheus_proxy_tls_enable | bool
+
+- name: Fail when FreeRADIUS Prometheus proxy TLS files are missing
+  ansible.builtin.assert:
+    that:
+      - (_freeradius_prometheus_proxy_tls_stat.results | selectattr('stat.exists', 'equalto', true) | list | length) == (_freeradius_prometheus_proxy_tls_stat.results | length)
+    fail_msg: >-
+      TLS is enabled for the FreeRADIUS Prometheus proxy, but one or more TLS files are missing.
+      Provide them as files:
+      - {{ freeradius_prometheus_proxy_tls_cert_file }}
+      - {{ freeradius_prometheus_proxy_tls_key_file }}
+  when: freeradius_prometheus_proxy_tls_enable | bool
+
+- name: Validate FreeRADIUS Prometheus proxy mTLS CA file exists (when enabled)
+  ansible.builtin.stat:
+    path: "{{ freeradius_prometheus_proxy_mtls_ca_file }}"
+  register: _freeradius_prometheus_proxy_mtls_ca_stat
+  when:
+    - freeradius_prometheus_proxy_tls_enable | bool
+    - freeradius_prometheus_proxy_mtls_enable | bool
+
+- name: Fail when FreeRADIUS Prometheus proxy mTLS CA file is missing
+  ansible.builtin.assert:
+    that:
+      - _freeradius_prometheus_proxy_mtls_ca_stat.stat.exists | default(false)
+    fail_msg: >-
+      mTLS is enabled for the FreeRADIUS Prometheus proxy, but the CA file is missing at {{ freeradius_prometheus_proxy_mtls_ca_file }}.
+      Provide it as a file.
+  when:
+    - freeradius_prometheus_proxy_tls_enable | bool
+    - freeradius_prometheus_proxy_mtls_enable | bool
+
+- name: Deploy nginx site for FreeRADIUS Prometheus proxy
+  ansible.builtin.template:
+    src: nginx-freeradius-prometheus.conf.j2
+    dest: /etc/nginx/conf.d/freeradius-prometheus.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Ensure nginx is enabled and running
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true

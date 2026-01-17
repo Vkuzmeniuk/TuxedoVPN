@@ -1,0 +1,104 @@
+---
+# iptables backend (best-effort fallback).
+# Applies inbound allowlist rules from ufw_extra_rules and explicitly DROPs
+# traffic to restricted ports from all other sources.
+
+- name: Ensure iptables is installed
+  ansible.builtin.package:
+    name: iptables
+    state: present
+  tags: ['iptables']
+
+- name: Allow established connections (iptables)
+  ansible.posix.iptables:
+    chain: INPUT
+    ctstate: ESTABLISHED,RELATED
+    jump: ACCEPT
+    comment: "common: allow established"
+    state: present
+    insert: true
+    rule_num: 1
+  tags: ['iptables']
+
+- name: Allow SSH (iptables)
+  ansible.posix.iptables:
+    chain: INPUT
+    protocol: tcp
+    destination_port: "{{ ssh_port }}"
+    jump: ACCEPT
+    comment: "common: allow ssh"
+    state: present
+    insert: true
+    rule_num: 1
+  when: manage_ssh | default(true) | bool
+  tags: ['iptables']
+
+- name: Build restricted port list for iptables (src-scoped rules)
+  ansible.builtin.set_fact:
+    _common_iptables_restricted_ports: "{{ (_common_iptables_restricted_ports | default([])) + [ {
+      'port': (item.port | string),
+      'proto': (item.proto | default('tcp'))
+    } ] }}"
+  loop: "{{ common_firewall_rules_effective | default(ufw_extra_rules | default([])) }}"
+  when:
+    - (item.direction | default('in')) == 'in'
+    - (item.action | default('allow')) == 'allow'
+    - (item.src | default('') | trim) != ''
+  tags: ['iptables']
+
+- name: Deduplicate restricted port list for iptables
+  ansible.builtin.set_fact:
+    _common_iptables_restricted_ports: "{{ (_common_iptables_restricted_ports | default([])) | unique }}"
+  tags: ['iptables']
+
+- name: Drop traffic to restricted ports from all other sources (iptables)
+  ansible.posix.iptables:
+    chain: INPUT
+    protocol: "{{ item.proto }}"
+    destination_port: "{{ item.port }}"
+    jump: DROP
+    comment: "common: restrict port {{ item.port }}/{{ item.proto }} (drop)"
+    state: present
+    insert: true
+    rule_num: 1
+  loop: "{{ _common_iptables_restricted_ports | default([]) }}"
+  tags: ['iptables']
+
+- name: Allow inbound ports without source restriction (iptables)
+  ansible.posix.iptables:
+    chain: INPUT
+    protocol: "{{ item.proto | default('tcp') }}"
+    destination_port: "{{ item.port }}"
+    jump: ACCEPT
+    comment: "common: allow {{ item.port }}/{{ item.proto | default('tcp') }}"
+    state: present
+    insert: true
+    rule_num: 1
+  loop: "{{ common_firewall_rules_effective | default(ufw_extra_rules | default([])) }}"
+  when:
+    - (item.direction | default('in')) == 'in'
+    - (item.action | default('allow')) == 'allow'
+    - (item.src | default('') | trim) == ''
+  loop_control:
+    label: "{{ item.port }}/{{ item.proto | default('tcp') }}"
+  tags: ['iptables']
+
+- name: Allow inbound ports from specific sources (iptables)
+  ansible.posix.iptables:
+    chain: INPUT
+    protocol: "{{ item.proto | default('tcp') }}"
+    destination_port: "{{ item.port }}"
+    source: "{{ item.src | trim }}"
+    jump: ACCEPT
+    comment: "common: allow {{ item.src | trim }} -> {{ item.port }}/{{ item.proto | default('tcp') }}"
+    state: present
+    insert: true
+    rule_num: 1
+  loop: "{{ common_firewall_rules_effective | default(ufw_extra_rules | default([])) }}"
+  when:
+    - (item.direction | default('in')) == 'in'
+    - (item.action | default('allow')) == 'allow'
+    - (item.src | default('') | trim) != ''
+  loop_control:
+    label: "{{ item.src | trim }} -> {{ item.port }}/{{ item.proto | default('tcp') }}"
+  tags: ['iptables']

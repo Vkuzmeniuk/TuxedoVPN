@@ -1,0 +1,47 @@
+# Managed by Ansible (role: common-vpn)
+#
+# TLS/mTLS wrapper for the local ocserv Prometheus exporter.
+# - the exporter listens on 127.0.0.1:{{ common_vpn_exporter_listen_port }}
+# - nginx terminates TLS on {{ common_vpn_exporter_proxy_listen_ip_effective }}:{{ common_vpn_exporter_proxy_listen_port }}
+#
+server {
+    {% if common_vpn_exporter_proxy_tls_enable | bool %}
+    listen {{ common_vpn_exporter_proxy_listen_ip_effective }}:{{ common_vpn_exporter_proxy_listen_port }} ssl;
+    {% else %}
+    listen {{ common_vpn_exporter_proxy_listen_ip_effective }}:{{ common_vpn_exporter_proxy_listen_port }};
+    {% endif %}
+    server_name {{ common_vpn_exporter_proxy_server_name }};
+
+    {% if common_vpn_exporter_proxy_tls_enable | bool %}
+    ssl_certificate     {{ common_vpn_exporter_proxy_tls_cert_file }};
+    ssl_certificate_key {{ common_vpn_exporter_proxy_tls_key_file }};
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    {% if common_vpn_exporter_proxy_mtls_enable | bool %}
+    ssl_client_certificate {{ common_vpn_exporter_proxy_mtls_ca_file }};
+    ssl_verify_client on;
+    {% else %}
+    ssl_verify_client off;
+    {% endif %}
+    {% endif %}
+
+    {% if (common_vpn_exporter_proxy_allowed_sources | default([])) | length > 0 %}
+    {% for src in (common_vpn_exporter_proxy_allowed_sources | default([])) %}
+    allow {{ src }};
+    {% endfor %}
+    deny all;
+    {% endif %}
+
+    location {{ common_vpn_exporter_metrics_path }} {
+        proxy_pass http://127.0.0.1:{{ common_vpn_exporter_listen_port }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location / {
+        return 404;
+    }
+}

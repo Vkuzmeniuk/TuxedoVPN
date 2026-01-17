@@ -1,0 +1,76 @@
+{% set entries = freeradius_nas_clients_render | default([]) %}
+{% set include_virtual = freeradius_nas_include_virtual_server | default(false) %}
+{% if entries | length == 0 %}
+SELECT 'NAS_SYNC=0';
+{% else %}
+WITH desired(nasname, shortname, type, ports, secret, server, community, description{% if include_virtual %}, virtual_server{% endif %}) AS (
+    VALUES
+    {%- for client in entries %}
+    (
+        '{{ client.nasname | replace("'", "''") }}',
+        '{{ client.shortname | replace("'", "''") }}',
+        '{{ client.type | replace("'", "''") }}',
+        {%- if client.ports is not none %}{{ client.ports }}{% else %}NULL::integer{% endif %},
+        '{{ client.secret | replace("'", "''") }}',
+        {%- if client.server is not none %}'{{ client.server | replace("'", "''") }}'{% else %}NULL{% endif %},
+        {%- if client.community is not none %}'{{ client.community | replace("'", "''") }}'{% else %}NULL{% endif %},
+        '{{ client.description | replace("'", "''") }}'
+        {%- if include_virtual %}
+        ,
+        {%- if client.virtual_server is not none %}'{{ client.virtual_server | replace("'", "''") }}'{% else %}NULL{% endif %}
+        {%- endif %}
+    ){% if not loop.last %},{% endif %}
+    {%- endfor %}
+),
+updated AS (
+    UPDATE nas AS n
+       SET shortname = d.shortname,
+           type = d.type,
+           ports = d.ports,
+           secret = d.secret,
+           server = d.server,
+           community = d.community,
+           description = d.description
+           {%- if include_virtual %},
+           virtual_server = d.virtual_server
+           {%- endif %}
+      FROM desired AS d
+     WHERE n.nasname = d.nasname
+       AND (
+            n.shortname IS DISTINCT FROM d.shortname OR
+            n.type IS DISTINCT FROM d.type OR
+            n.ports IS DISTINCT FROM d.ports OR
+            n.secret IS DISTINCT FROM d.secret OR
+            n.server IS DISTINCT FROM d.server OR
+            n.community IS DISTINCT FROM d.community OR
+            n.description IS DISTINCT FROM d.description
+            {%- if include_virtual %} OR
+            n.virtual_server IS DISTINCT FROM d.virtual_server
+            {%- endif %}
+       )
+    RETURNING 1
+),
+inserted AS (
+    INSERT INTO nas (nasname, shortname, type, ports, secret, server, community, description{% if include_virtual %}, virtual_server{% endif %})
+    SELECT d.nasname,
+           d.shortname,
+           d.type,
+           d.ports,
+           d.secret,
+           d.server,
+           d.community,
+           d.description
+           {%- if include_virtual %},
+           d.virtual_server
+           {%- endif %}
+      FROM desired AS d
+     WHERE NOT EXISTS (SELECT 1 FROM nas AS n WHERE n.nasname = d.nasname)
+    RETURNING 1
+)
+SELECT 'NAS_SYNC=' ||
+       CASE
+         WHEN EXISTS (SELECT 1 FROM updated) OR EXISTS (SELECT 1 FROM inserted)
+           THEN '1'
+         ELSE '0'
+       END;
+{% endif %}

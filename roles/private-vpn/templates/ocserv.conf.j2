@@ -1,0 +1,163 @@
+# ===== RADIUS / local authentication =====
+{% if vpn_auth_mode == 'radius' %}
+auth = "radius[config={{ vpn_radius_config }},groupconfig=true]"
+{% if vpn_radius_accounting %}
+acct = "radius[config={{ vpn_radius_config }}]"
+{% endif %}
+{% else %}
+auth = "plain[passwd={{ vpn_ocpasswd_file }}]"
+{% endif %}
+#----------------------
+
+# Listener (bind)
+listen-host = {{ vpn_listen_host }}
+listen-proxy-proto = {{ 'true' if vpn_listen_proxy_proto else 'false' }}
+tcp-port = {{ vpn_listen_port }}
+
+run-as-user = {{ vpn_run_user }}
+run-as-group = {{ vpn_run_group }}
+
+socket-file = {{ vpn_socket_file }}
+
+server-cert = {{ _ocserv_cert_fullchain }}
+server-key = {{ _ocserv_cert_key }}
+
+isolate-workers = {{ 'true' if vpn_isolate_workers else 'false' }}
+
+max-clients = {{ vpn_max_clients }}
+max-same-clients = {{ vpn_max_same_clients }}
+
+server-stats-reset-time = {{ vpn_stats_reset_time }}
+{% if vpn_stats_report_time | default(0) | int > 0 %}
+stats-report-time = {{ vpn_stats_report_time }}
+{% endif %}
+
+# Keepalive (liveness check) in seconds
+keepalive = {{ vpn_keepalive }}
+
+# Dead peer detection (DPD) in seconds
+dpd = {{ vpn_dpd }}
+
+# DPD for mobile clients
+mobile-dpd = {{ vpn_mobile_dpd }}
+
+switch-to-tcp-timeout = {{ vpn_switch_to_tcp_timeout }}
+
+# MTU discovery (DPD must be enabled)
+try-mtu-discovery = {{ 'true' if vpn_try_mtu_discovery else 'false' }}
+
+# OID used to read a user ID from the client certificate.
+cert-user-oid = {{ vpn_cert_user_oid }}
+
+# Compression negotiation (LZS, LZ4)
+{% if vpn_enable_compression %}
+compression = true
+no-compress-limit = {{ vpn_no_compress_limit }}
+{% else %}
+# compression is disabled
+#compression = true
+{% endif %}
+
+tls-priorities = "{{ vpn_tls_priorities }}"
+#tls-priorities = "{{ vpn_tls_priorities_alt }}"
+
+# Time (sec) a client may stay connected before authentication
+auth-timeout = {{ vpn_auth_timeout }}
+
+# Idle timeouts
+idle-timeout = {{ vpn_idle_timeout }}
+mobile-idle-timeout = {{ vpn_mobile_idle_timeout }}
+
+# Time (sec) during which reconnect is denied after a failed authentication
+min-reauth-time = {{ vpn_min_reauth_time }}
+
+# ocserv client banning uses a score-based system.
+max-ban-score = {{ vpn_ban.max_score }}
+
+# Time (sec) after which the client's score is reset.
+ban-reset-time = {{ vpn_ban.reset_time }}
+
+# Cookie timeout (sec)
+cookie-timeout = {{ vpn_cookie_timeout }}
+
+# Whether roaming is allowed
+deny-roaming = {{ 'true' if vpn_deny_roaming else 'false' }}
+
+# Key rotation (rekey)
+rekey-time = {{ vpn_rekey_time }}
+rekey-method = {{ vpn_rekey_method }}
+
+# occtl utility support
+use-occtl = {{ 'true' if vpn_use_occtl else 'false' }}
+
+# PID file
+pid-file = {{ vpn_pid_file }}
+
+#
+# Network settings
+#
+
+log-level = {{ vpn_log_level }}
+log-file = {{ vpn_log_file }}
+
+# Tun device name
+device = {{ vpn_device }}
+
+# Predictable per-user IPs
+predictable-ips = {{ 'true' if vpn_predictable_ips else 'false' }}
+
+# Default domain
+default-domain = {{ vpn_default_domain }}
+
+ipv4-network = {{ vpn_ipv4_network }}
+ipv4-netmask = {{ vpn_ipv4_netmask }}
+
+# Routing / split-tunneling
+#
+# - Full tunnel (default): advertise `route = default`
+# - Split tunnel: set vpn_route_all_traffic=false and list networks in vpn_routes
+{% set _vpn_routes = (vpn_routes | default([])) %}
+{% if vpn_route_all_traffic | default(true) | bool %}
+{% set _vpn_routes = ['default'] + _vpn_routes %}
+{% endif %}
+{% for r in (_vpn_routes | default([]) | unique) %}
+route = {{ r }}
+{% endfor %}
+{% for r in (vpn_no_routes | default([]) | unique) %}
+no-route = {{ r }}
+{% endfor %}
+{% for d in (vpn_split_dns_domains | default([]) | unique) %}
+split-dns = {{ d }}
+{% endfor %}
+
+# Whether to tunnel all DNS queries through VPN
+tunnel-all-dns = {{ 'true' if vpn_tunnel_all_dns else 'false' }}
+
+# Advertised DNS server(s)
+{% for dns in vpn_dns_servers %}
+dns = {{ dns }}
+{% endfor %}
+
+ping-leases = {{ 'true' if vpn_ping_leases else 'false' }}
+
+#
+# AnyConnect client compatibility
+#
+cisco-client-compat = {{ 'true' if vpn_cisco_client_compat else 'false' }}
+cisco-svc-client-compat = {{ 'true' if vpn_cisco_svc_client_compat else 'false' }}
+client-bypass-protocol = {{ 'true' if vpn_client_bypass_protocol else 'false' }}
+dtls-legacy = {{ 'true' if vpn_dtls_legacy else 'false' }}
+
+# Camouflage
+{% if vpn_camouflage_enabled %}
+camouflage = true
+camouflage_secret = "{{ vpn_camouflage_secret }}"
+camouflage_realm = "{{ vpn_camouflage_realm }}"
+{% else %}
+#camouflage = false
+{% endif %}
+
+# HTTP headers
+{% for h in vpn_http_headers %}
+included-http-headers = {{ h }}
+{% endfor %}

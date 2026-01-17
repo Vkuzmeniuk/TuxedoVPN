@@ -1,0 +1,22 @@
+---
+- name: Deploy ssh hardening drop-in
+  ansible.builtin.template:
+    src: sshd_hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/90-hardening.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart ssh
+
+- name: Enforce password authentication settings (override tail)
+  ansible.builtin.blockinfile:
+    path: /etc/ssh/sshd_config
+    marker: "# {mark} ansible common hardening"
+    insertafter: EOF
+    block: |
+      PasswordAuthentication yes
+      KbdInteractiveAuthentication no
+      ChallengeResponseAuthentication no
+      UsePAM yes
+      PermitRootLogin no
+  notify: Restart ssh

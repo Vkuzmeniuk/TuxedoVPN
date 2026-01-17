@@ -1,0 +1,10 @@
+sqlcounter sqlcounter_max_sessions {
+    sql_module_instance = sql
+    dialect = "postgresql"
+    counter_name = Concurrent-Sessions
+    key = User-Name
+    check_name = Simultaneous-Use
+    reply_name = Reply-Message
+    reset = never
+    query = "SELECT COUNT(*) FROM radacct WHERE username = '{% raw %}%{%{SQL-User-Name}:-%{User-Name}}{% endraw %}' AND acctstoptime IS NULL"
+}

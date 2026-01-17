@@ -1,0 +1,37 @@
+---
+# Default variables for the mgmt-wireguard role
+
+# Inventory groups where the management WireGuard tunnel is deployed.
+# ``mgmt_wireguard_mgmt_group`` must contain the management host(s),
+# and ``mgmt_wireguard_vpn_group`` must contain the VPN host(s).
+# The role uses these group names to determine which endpoint settings to apply.
+mgmt_wireguard_mgmt_group: "mgmt"
+mgmt_wireguard_vpn_group: "vpn"
+
+# WireGuard interface name and port. The interface will be created as
+# ``wg-quick@<interface>`` and on mgmt hosts will listen on the specified UDP port.
+mgmt_wireguard_interface: "wg-mgmt"
+mgmt_wireguard_port: 51820
+
+# WireGuard addresses for mgmt and vpn endpoints.
+#
+# By default /24 is used so multiple VPN nodes can get unique addresses.
+# VPN nodes get an address automatically in inventory order unless they define
+# `mgmt_wireguard_wireguard_address` in host_vars.
+mgmt_wireguard_address_mgmt: "10.202.0.1/24"
+mgmt_wireguard_address_vpn: ""
+mgmt_wireguard_auto_assign_vpn_addresses: true
+mgmt_wireguard_vpn_ip_start: 2
+
+# PersistentKeepalive interval (seconds) for VPN peers.
+# Needed to keep state when NAT is involved.
+mgmt_wireguard_persistent_keepalive: 25
+
+# Paths for storing generated keys and the tunnel configuration.
+# Private and public keys are generated automatically when missing.
+mgmt_wireguard_private_key_path: "/etc/wireguard/{{ mgmt_wireguard_interface }}.key"
+mgmt_wireguard_public_key_path: "/etc/wireguard/{{ mgmt_wireguard_interface }}.pub"
+mgmt_wireguard_config_path: "/etc/wireguard/{{ mgmt_wireguard_interface }}.conf"
+
+# Default prefix for VPN client networks when not set.
+mgmt_wireguard_default_prefix_length: 24

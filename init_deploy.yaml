@@ -1,0 +1,58 @@
+- hosts: all
+  gather_facts: false
+  remote_user: root
+  become: false
+  vars:
+    support_password_plain: "{{ ansible_become_password | mandatory }}"
+    support_password_hash: >-
+      {{ support_password_plain | password_hash('sha512') }}
+
+    deploy_users:
+      - name: support
+        password_hash: "{{ support_password_hash }}"
+        pubkey: "{{ lookup('file', lookup('env','HOME') + '/.ssh/ansible_ed25519.pub') }}"
+  
+  tasks:
+    - name: Show who Ansible really is
+      ansible.builtin.command: id
+      register: id_out
+
+    - debug:
+        var: id_out.stdout
+        
+    - name: Ensure deploy users exist and set password from vault (fix broken state)
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        shell: /bin/bash
+        groups: sudo
+        append: true
+        create_home: true
+        password: "{{ item.password_hash }}"
+        update_password: always    # <-- force update once
+      loop: "{{ deploy_users }}"
+
+    - name: Ensure ~/.ssh exists for each deploy user
+      ansible.builtin.file:
+        path: "/home/{{ item.name }}/.ssh"
+        state: directory
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: "0700"
+      loop: "{{ deploy_users }}"
+
+    - name: Install SSH public key for each deploy user
+      ansible.builtin.authorized_key:
+        user: "{{ item.name }}"
+        key: "{{ item.pubkey }}"
+        state: present
+      loop: "{{ deploy_users }}"
+
+    # - name: Rotate deploy user passwords from vault
+    #   ansible.builtin.user:
+    #     name: "{{ item.name }}"
+    #     password: "{{ item.password_hash }}"
+    #     update_password: always
+    #   loop: "{{ deploy_users }}"
+    #   when: rotate_deploy_passwords | default(false) | bool
+    #   tags:
+    #     - rotate_passwords

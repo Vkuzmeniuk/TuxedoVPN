@@ -1,0 +1,17 @@
+client localhost {
+    ipaddr = 127.0.0.1
+    secret = "{{ freeradius_client_secret | replace('\\', '\\\\') | replace('\"', '\\\"') }}"
+    require_message_authenticator = {{ 'yes' if freeradius_localhost_require_message_authenticator | default(false) | bool else 'no' }}
+    limit_proxy_state = yes
+    nas_type = other
+}
+
+{% for client in freeradius_clients | default([]) %}
+client {{ client.name | regex_replace('[^A-Za-z0-9_]', '_') }} {
+    ipaddr = {{ client.ip }}
+    secret = "{{ client.secret | replace('\\', '\\\\') | replace('\"', '\\\"') }}"
+    proto = udp
+    require_message_authenticator = no
+    limit_proxy_state = yes
+}
+{% endfor %}

@@ -1,0 +1,94 @@
+---
+- name: Ensure tuxedo CLI prerequisites are present
+  ansible.builtin.package:
+    name:
+      - python3
+      - python3-psycopg2
+    state: present
+  when: tuxedo_cli_enable | bool
+  tags: ["tuxedo_cli", "packages"]
+
+- name: Create tuxedovpn config directory
+  ansible.builtin.file:
+    path: "{{ tuxedo_cli_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: tuxedo_cli_enable | bool
+  tags: ["tuxedo_cli"]
+
+- name: Install tuxedo config
+  ansible.builtin.template:
+    src: tuxedo.ini.j2
+    dest: "{{ tuxedo_cli_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: tuxedo_cli_enable | bool
+  tags: ["tuxedo_cli"]
+
+- name: Install Postgres pgpass file for tuxedo
+  ansible.builtin.template:
+    src: tuxedo.pgpass.j2
+    dest: "{{ tuxedo_cli_pgpass_path }}"
+    owner: "{{ tuxedo_cli_run_user }}"
+    group: "{{ tuxedo_cli_run_group }}"
+    mode: "0600"
+  when: tuxedo_cli_enable | bool
+  no_log: true
+  tags: ["tuxedo_cli"]
+
+- name: Create tuxedo install directory
+  ansible.builtin.file:
+    path: "{{ tuxedo_cli_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: tuxedo_cli_enable | bool
+  tags: ["tuxedo_cli"]
+
+- name: Install tuxedo Python package sources
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/tuxedo/src/tuxedo"
+    dest: "{{ tuxedo_cli_install_dir }}/"
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+  when: tuxedo_cli_enable | bool
+  tags: ["tuxedo_cli"]
+
+- name: Install tuxedo CLI wrapper
+  ansible.builtin.template:
+    src: tuxedo-wrapper.py.j2
+    dest: "{{ tuxedo_cli_wrapper_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: tuxedo_cli_enable | bool
+  tags: ["tuxedo_cli"]
+
+- name: Ensure tuxedo helper tables exist
+  ansible.builtin.command: >-
+    psql -d {{ tuxedo_cli_pg_db }} -v ON_ERROR_STOP=1 -c
+    "CREATE TABLE IF NOT EXISTS {{ tuxedo_cli_groups_table }} (
+       name TEXT PRIMARY KEY,
+       description TEXT,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+     );
+     CREATE TABLE IF NOT EXISTS {{ tuxedo_cli_blocklist_table }} (
+       username TEXT PRIMARY KEY,
+       reason TEXT,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       expires_at TIMESTAMPTZ
+     );
+     CREATE INDEX IF NOT EXISTS idx_vpn_user_blocklist_expires
+       ON {{ tuxedo_cli_blocklist_table }} (expires_at);"
+  become_user: postgres
+  changed_when: false
+  when:
+    - tuxedo_cli_enable | bool
+    - tuxedo_cli_manage_schema | bool
+  tags: ["tuxedo_cli", "postgresql"]

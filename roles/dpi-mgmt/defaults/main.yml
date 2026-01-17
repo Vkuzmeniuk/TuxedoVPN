@@ -1,0 +1,34 @@
+---
+# DPI automation on the mgmt side:
+# - receive events from VPN nodes (webhook over WireGuard)
+# - insert temporary blocks into FreeRADIUS `vpn_user_blocklist`
+# (notifications are optional and out of scope for this role)
+
+dpi_mgmt_enable: true
+
+dpi_mgmt_listen_ip: "{{ mgmt_wireguard_mgmt_ip | default('127.0.0.1') }}"
+dpi_mgmt_listen_port: 9816
+
+# Shared token expected in the X-TuxedoVPN-Token header (recommended).
+dpi_mgmt_webhook_token: "{{ vault_dpi_webhook_token | default('') }}"
+dpi_mgmt_webhook_token_path: "/etc/tuxedovpn/dpi-webhook.token"
+
+# Block duration in seconds (default: 15 minutes).
+dpi_mgmt_block_seconds: 900
+
+# Firewall policy for the mgmt webhook:
+# prefer an allowlist by WireGuard peers (one per VPN node); if it can't be derived,
+# optionally allow the whole WireGuard subnet.
+dpi_mgmt_allow_wg_subnet_fallback: true
+
+# After deployment run a minimal local smoke test (webhook -> DB insert -> cleanup).
+dpi_mgmt_selftest_enable: true
+dpi_mgmt_selftest_username: "__tuxedovpn_dpi_selftest__"
+dpi_mgmt_selftest_vpn_ip: "10.66.255.254"
+
+# FreeRADIUS DB connection (local on mgmt).
+dpi_db_host: "127.0.0.1"
+dpi_db_port: 5432
+dpi_db_name: "{{ freeradius_db_name | default('radius') }}"
+dpi_db_user: "{{ freeradius_db_user | default('radius') }}"
+dpi_db_password: "{{ freeradius_db_password | default('') }}"

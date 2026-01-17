@@ -1,0 +1,15 @@
+# Example inventory (copy to inventory/hosts.ini)
+#
+# Notes:
+# - Use your real public IPs / hostnames here.
+# - inventory/hosts.ini is ignored by git on purpose.
+#
+[all]
+vpn-srv-01     ansible_host=203.0.113.10
+mgmt-srv-01    ansible_host=203.0.113.20
+
+[vpn]
+vpn-srv-01
+
+[mgmt]
+mgmt-srv-01

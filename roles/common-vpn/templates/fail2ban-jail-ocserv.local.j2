@@ -1,0 +1,10 @@
+# Managed by Ansible (role: common-vpn)
+[ocserv]
+enabled = true
+port = {{ vpn_listen_port }}
+filter = ocserv
+logpath = {{ vpn_log_file }}
+maxretry = 5
+findtime = 10m
+bantime = 1h
+banaction = {{ common_fail2ban_banaction | default('iptables-multiport') }}

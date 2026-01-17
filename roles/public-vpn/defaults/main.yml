@@ -1,0 +1,14 @@
+vpn_cert_use_existing: false
+vpn_listen_host: "0.0.0.0"
+vpn_auth_mode: "radius"
+vpn_radius_accounting: true
+vpn_listen_proxy_proto: false
+public_vpn_camouflage_enabled: true
+public_vpn_camouflage_realm: "Restricted Content"
+vpn_camouflage_enabled: true
+vpn_stats_report_time: 300
+common_vpn_exporter_static_labels:
+  vpn_role: "public"
+common_vpn_template_src: "{{ playbook_dir }}/roles/public-vpn/templates/ocserv.conf.j2"
+vpn_nat_subnets:
+  - "10.66.1.0/24"

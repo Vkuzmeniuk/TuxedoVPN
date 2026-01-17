@@ -1,0 +1,12 @@
+http_pihole_port: 80
+https_pihole_port: 8443
+udp_dns_port: 53
+
+pihole_privacy_mode: 0
+pihole_query_logging: true
+
+# Upstream resolvers for Pi-hole itself (can be overridden in inventory).
+pihole_dns_server_1: 1.1.1.1
+pihole_dns_server_2: 1.0.0.1
+
+pihole_service_name: pihole-FTL

@@ -1,0 +1,4 @@
+---
+- name: "Dispatch to node/server mode"
+  ansible.builtin.include_tasks: "{{ mode }}.yml"
+  tags: always

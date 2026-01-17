@@ -1,0 +1,15 @@
+---
+- name: Install node_exporter (Ubuntu package)
+  ansible.builtin.apt:
+    name: prometheus-node-exporter
+    state: present
+    update_cache: true
+    lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
+  tags: ['node_exporter']
+
+- name: Ensure node_exporter running
+  ansible.builtin.service:
+    name: prometheus-node-exporter
+    state: started
+    enabled: true
+  tags: ['node_exporter']

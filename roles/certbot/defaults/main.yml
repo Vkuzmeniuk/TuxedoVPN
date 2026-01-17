@@ -1,0 +1,58 @@
+---
+# Certbot can be invoked directly, or included by other roles when certificate files are missing
+# (e.g. when `tuxedovpn_tls_mode: certbot` is enabled).
+
+certbot_action: "issue" # issue | renew
+
+# Common flags
+certbot_email: "{{ vault_certbot_email | default('') }}"
+certbot_agree_tos: true
+certbot_staging: false
+certbot_force_renewal: false
+certbot_keep_until_expiring: true
+
+# Domains and names
+certbot_domains: []
+certbot_cert_name: ""
+
+# Challenge method:
+# - dns: requires provider/plugin-specific arguments (recommended for wildcards and hosts behind an L4 proxy)
+# - webroot: requires HTTP/80 reachability to the host and a webroot serving `/.well-known/acme-challenge/`
+# - standalone: certbot runs its own temporary HTTP-01 listener on :80 (no TLS-ALPN support in the standalone plugin)
+certbot_method: "dns" # dns | webroot | standalone
+
+# When using standalone mode, stop these services before issuing (to free the port)
+# and start them again afterwards.
+certbot_standalone_stop_services: [] # e.g. ["ocserv", "nginx"]
+
+# Also install Certbot renewal pre/post hooks to stop/start services for standalone renewals.
+certbot_standalone_install_renew_hooks: true
+certbot_standalone_renew_pre_hook_path: "/etc/letsencrypt/renewal-hooks/pre/tuxedovpn-standalone-stop-services.sh"
+certbot_standalone_renew_post_hook_path: "/etc/letsencrypt/renewal-hooks/post/tuxedovpn-standalone-start-services.sh"
+
+# Extra args passed to certbot as-is.
+# Examples:
+# - DNS (Cloudflare):
+#   ["--dns-cloudflare","--dns-cloudflare-credentials","/etc/letsencrypt/dns-credentials.ini","--dns-cloudflare-propagation-seconds","60"]
+# - DNS (Route53):
+#   ["--dns-route53"]
+certbot_auth_args: []
+certbot_extra_args: []
+
+# webroot support (HTTP-01)
+certbot_webroot_path: "/var/www/letsencrypt"
+certbot_manage_webroot_nginx: false
+certbot_webroot_nginx_conf_path: "/etc/nginx/conf.d/letsencrypt-webroot.conf"
+
+# DNS credentials file (needed only if the plugin requires it).
+certbot_dns_credentials_path: "/etc/letsencrypt/dns-credentials.ini"
+certbot_dns_credentials_content: "{{ vault_certbot_dns_credentials_ini | default('') }}"
+
+# Packages
+certbot_package: "certbot"
+certbot_dns_plugin_packages: [] # e.g. ["python3-certbot-dns-cloudflare"]
+
+# Deploy hook: restart services after issuing/renewing a certificate.
+certbot_deploy_hook_enable: true
+certbot_deploy_hook_path: "/etc/letsencrypt/renewal-hooks/deploy/tuxedovpn-reload-services.sh"
+certbot_deploy_hook_services: [] # e.g. ["ocserv", "haproxy", "nginx"]

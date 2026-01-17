@@ -1,0 +1,112 @@
+---
+# DPI (Suricata + local action agent) for VPN nodes.
+
+dpi_suricata_enable: true
+# NFQUEUE number must match the firewall mangle rules.
+dpi_suricata_queue_num: "{{ vpn_nfqueue_num | default(0) | int }}"
+
+# Use the default Suricata config path on Debian/Ubuntu.
+dpi_suricata_config_path: "/etc/suricata/suricata.yaml"
+
+# Install torrent/P2P rules into Suricata's default rules directory.
+# This matches the rule-files entry in the default `suricata.yaml`: `- suricata.rules`.
+dpi_suricata_rule_dest: "/var/lib/suricata/rules/suricata.rules"
+
+# The bundled suricata.yaml references /etc/suricata/classification.config.
+dpi_suricata_classification_src: "/etc/suricata/classification.config"
+dpi_suricata_classification_dest: "/etc/suricata/classification.config"
+
+# HOME_NET should reflect VPN client subnets (the traffic we want to "policy").
+# By default we use `vpn_nat_subnets` when set; otherwise fall back to VPN IPv4 network/prefix.
+dpi_suricata_home_nets: []
+
+# Safety switch: when true, rewrite `drop ...` rules to `alert ...` (monitoring only).
+# Defaults to false because this project expects real DPI drops in inline mode.
+dpi_suricata_convert_drop_to_alert: false
+
+# Compatibility: some rule feeds use `http1`, while Suricata expects `http`.
+dpi_suricata_convert_http1_to_http: true
+
+# Append a minimal local ruleset to guarantee BitTorrent detection even if upstream rules miss.
+dpi_suricata_append_local_rules: true
+
+# Some upstream rules may contain keywords not supported by the installed Suricata version.
+# When enabled, comment out such rules so the ruleset can still be loaded.
+dpi_suricata_comment_incompatible_rules: true
+
+# Validate the resulting suricata.yaml on the target host before replacing the live file.
+dpi_suricata_validate_config: true
+
+# Enable NFQUEUE mangle hooks via the existing common-vpn UFW logic.
+# Requires `vpn_enable_mangle: true` at the host/group level.
+dpi_require_nfqueue: true
+
+# After deployment run extra non-destructive checks to catch wiring issues early.
+dpi_selftest_enable: true
+
+# Optionally install small diagnostic utilities.
+dpi_install_debug_tools: true
+dpi_debug_tools_packages:
+  - ripgrep
+  - jq
+
+# Local agent: exports Prometheus metrics and disconnects "violating" sessions.
+dpi_agent_enable: true
+dpi_agent_listen_ip: "0.0.0.0"
+dpi_agent_listen_port: 9815
+dpi_agent_metrics_path: "/metrics"
+
+# How to decide which Suricata alerts should trigger disconnect:
+# - ruleset: match by `alert.signature_id` (SID) if it exists in `dpi_agent_ruleset_path` (recommended)
+# - regex: match by `alert.signature` text via `dpi_agent_signature_match_regex`
+# - both: either ruleset match or regex match
+dpi_agent_match_mode: "ruleset"
+
+# Path to the rules file deployed to VPN nodes.
+dpi_agent_ruleset_path: "{{ dpi_suricata_rule_dest }}"
+
+# Optional: do not disconnect for these SIDs even if present in the ruleset.
+dpi_agent_ignore_sids: []
+
+# Used when `dpi_agent_match_mode` is `regex` or `both`.
+dpi_agent_signature_match_regex: "(?i)\\b(p2p|torrent|bittorrent)\\b"
+
+# Additional "strong" EVE event types that may trigger disconnect even without alerts.
+# `bittorrent_dht` is emitted by Suricata when it successfully parses BitTorrent DHT (KRPC).
+dpi_agent_eve_event_types:
+  - alert
+  - drop
+  - bittorrent_dht
+
+# Pause to avoid flapping enforcement disconnects for the same user (seconds).
+dpi_agent_disconnect_cooldown_seconds: 60
+
+# Coalesce overly "noisy" detections in tuxedovpn_dpi_events_total{stage="detect"}:
+# count at most once per (user, reason) within this window (seconds).
+dpi_agent_detect_dedup_seconds: "{{ dpi_agent_disconnect_cooldown_seconds }}"
+
+# Limit the rate of active actions (webhook + first disconnect attempt) per (user-or-ip, reason) (seconds).
+# This prevents a single torrent session from producing dozens of identical webhook calls.
+dpi_agent_action_cooldown_seconds: "{{ dpi_agent_disconnect_cooldown_seconds }}"
+
+# Local block to prevent immediate cookie-based reconnects.
+# If a user triggers a DPI hit, the agent will keep disconnecting them until the block expires.
+dpi_agent_block_seconds: 900
+
+# How often to poll occtl for active sessions (seconds).
+dpi_agent_enforce_poll_seconds: 5
+
+# Minimum interval between enforcement disconnects for the same user (seconds).
+dpi_agent_enforce_min_interval_seconds: 5
+
+# When username can't be resolved immediately, keep a short IP-based correlation window (seconds).
+# This is only needed to bridge the gap until we can map vpn_ip -> username (after that we switch to user-based blocks).
+dpi_agent_ip_correlation_seconds: 120
+
+# Optional: send events to the mgmt webhook for centralized blocking + Telegram.
+dpi_mgmt_webhook_url: ""
+dpi_mgmt_webhook_token: ""
+dpi_mgmt_webhook_token_path: "/etc/tuxedovpn/dpi-webhook.token"
+
+# Path to occtl (ocserv control tool).
+dpi_occtl_path: "/usr/bin/occtl"

@@ -1,0 +1,38 @@
+global
+    log /dev/log    local0
+    log /dev/log    local1 notice
+    daemon
+    user haproxy
+    group haproxy
+    maxconn {{ balancer_maxconn }}
+
+defaults
+    log     global
+    mode    tcp
+    option  dontlognull
+    option  tcplog
+    timeout connect {{ balancer_timeout_connect }}
+    timeout client  {{ balancer_timeout_client }}
+    timeout server  {{ balancer_timeout_server }}
+    retries 3
+
+frontend vpn_frontend
+    bind {{ balancer_frontend_bind }}
+    default_backend vpn_backend
+
+backend vpn_backend
+    mode tcp
+    balance {{ balancer_balance_algorithm }}
+    option tcp-check
+{% set backends = groups['vpn'] | default([]) %}
+{% if backends | length == 0 %}
+    # No VPN backends defined in inventory group [vpn]
+{% else %}
+{%   for host in backends %}
+{%     set host_data = hostvars[host] %}
+{%     set server_name = host | regex_replace('[^A-Za-z0-9_]', '_') %}
+{%     set address = host_data.balancer_backend_ip | default(host_data.ansible_host | default(host)) %}
+{%     set port = host_data.balancer_backend_port | default(host_data.vpn_listen_port | default(balancer_backend_port)) %}
+    server {{ server_name }} {{ address }}:{{ port }}{% if balancer_backend_send_proxy %} send-proxy{% endif %} check
+{%   endfor %}
+{% endif %}

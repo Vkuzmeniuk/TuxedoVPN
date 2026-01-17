@@ -1,0 +1,20 @@
+auth_order      radius
+login_tries     4
+login_timeout   60
+radius_timeout  10
+radius_retries  3
+dictionary      /etc/radcli/dictionary
+seqfile         /var/run/radius.seq
+mapfile         /etc/radcli/port-id-map
+servers         /etc/radcli/servers
+{% for server in vpn_radius_servers %}
+authserver      {{ server.host }}{% if server.auth_port is defined %}:{{ server.auth_port }}{% else %}:1812{% endif %}
+{% endfor %}
+
+{% if vpn_radius_accounting %}
+{%   for server in vpn_radius_servers %}
+acctserver      {{ server.host }}{% if server.acct_port is defined %}:{{ server.acct_port }}{% else %}:1813{% endif %}
+{%   endfor %}
+{% endif %}
+
+login_local     yes

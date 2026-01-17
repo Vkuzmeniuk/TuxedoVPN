@@ -1,0 +1,96 @@
+---
+- name: Validate certbot cert files exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _mgmt_proxy_le_stat
+  loop:
+    - "{{ mgmt_reverse_proxy_letsencrypt_fullchain }}"
+    - "{{ mgmt_reverse_proxy_letsencrypt_privkey }}"
+  changed_when: false
+
+- name: Compute list of missing certbot cert files (mgmt reverse proxy)
+  ansible.builtin.set_fact:
+    _mgmt_proxy_missing_cert_files: >-
+      {{
+        (_mgmt_proxy_le_stat.results | default([]))
+        | rejectattr('stat.exists', 'equalto', true)
+        | map(attribute='item')
+        | list
+      }}
+  changed_when: false
+
+- name: Auto-issue missing mgmt reverse proxy TLS certificate via Certbot (when enabled)
+  ansible.builtin.include_role:
+    name: certbot
+  vars:
+    certbot_action: "issue"
+    certbot_domains: >-
+      {{
+        (mgmt_reverse_proxy_services | default([]))
+        | map(attribute='server_name')
+        | select('defined')
+        | map('regex_replace', '^\\s+|\\s+$', '')
+        | reject('equalto', '')
+        | list
+        | unique
+      }}
+    certbot_cert_name: "{{ mgmt_reverse_proxy_cert_name }}"
+    certbot_method: "{{ mgmt_reverse_proxy_certbot_method | default('standalone') }}"
+    certbot_auth_args: "{{ mgmt_reverse_proxy_certbot_auth_args | default([]) }}"
+    certbot_extra_args: "{{ mgmt_reverse_proxy_certbot_extra_args | default([]) }}"
+    certbot_standalone_stop_services: "{{ mgmt_reverse_proxy_certbot_standalone_stop_services | default(['pihole-FTL','nginx','apache2']) }}"
+    certbot_deploy_hook_services:
+      - nginx
+  when:
+    - (_mgmt_proxy_missing_cert_files | default([]) | length) > 0
+    - mgmt_reverse_proxy_cert_auto_issue_enable | default(true) | bool
+  tags: ['certbot']
+
+- name: Re-check certbot cert files exist (mgmt reverse proxy, after auto-issue)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _mgmt_proxy_le_stat_after
+  loop:
+    - "{{ mgmt_reverse_proxy_letsencrypt_fullchain }}"
+    - "{{ mgmt_reverse_proxy_letsencrypt_privkey }}"
+  when:
+    - (_mgmt_proxy_missing_cert_files | default([]) | length) > 0
+    - mgmt_reverse_proxy_cert_auto_issue_enable | default(true) | bool
+  changed_when: false
+
+- name: Update list of missing certbot cert files (mgmt reverse proxy, after auto-issue)
+  ansible.builtin.set_fact:
+    _mgmt_proxy_missing_cert_files: >-
+      {{
+        (_mgmt_proxy_le_stat_after.results | default([]))
+        | rejectattr('stat.exists', 'equalto', true)
+        | map(attribute='item')
+        | list
+      }}
+  when:
+    - (_mgmt_proxy_missing_cert_files | default([]) | length) > 0
+    - mgmt_reverse_proxy_cert_auto_issue_enable | default(true) | bool
+  changed_when: false
+
+- name: Fail when certbot cert files are missing
+  ansible.builtin.assert:
+    that:
+      - (_mgmt_proxy_missing_cert_files | default([]) | length) == 0
+    fail_msg: >-
+      Let's Encrypt certificate files are missing for mgmt reverse proxy.
+      Missing (or broken symlinks):
+      - {{ (_mgmt_proxy_missing_cert_files | default([])) | join('\n      - ') }}
+      Expected:
+      - {{ mgmt_reverse_proxy_letsencrypt_fullchain }}
+      - {{ mgmt_reverse_proxy_letsencrypt_privkey }}
+      If you want Ansible to issue them automatically:
+      - keep mgmt_reverse_proxy_cert_auto_issue_enable=true (default)
+      - set vault_certbot_email (Ansible Vault)
+      - ensure service domains resolve to this host for ACME validation (or configure DNS-01 via mgmt_reverse_proxy_certbot_method/mgmt_reverse_proxy_certbot_auth_args)
+      Otherwise switch to self-signed via mgmt_reverse_proxy_tls_mode: selfsigned.
+
+- name: Set effective TLS paths (certbot)
+  ansible.builtin.set_fact:
+    mgmt_reverse_proxy_tls_fullchain_effective: "{{ mgmt_reverse_proxy_letsencrypt_fullchain }}"
+    mgmt_reverse_proxy_tls_key_effective: "{{ mgmt_reverse_proxy_letsencrypt_privkey }}"
+  changed_when: false

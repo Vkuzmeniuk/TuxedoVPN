@@ -1,0 +1,69 @@
+---
+# Install and configure radsecproxy so ocserv can use RadSec (RADIUS over TLS).
+
+- name: Derive RadSec upstream host for radsecproxy
+  ansible.builtin.set_fact:
+    vpn_radsecproxy_upstream_host_effective: >-
+      {{
+        (vpn_radsecproxy_upstream_host | default('') | trim)
+        | default((vpn_radius_servers | first).host | default(''), true)
+      }}
+
+- name: Validate RadSec upstream host for radsecproxy
+  ansible.builtin.assert:
+    that:
+      - vpn_radsecproxy_upstream_host_effective | default('') | trim | length > 0
+      - (vpn_radsecproxy_local_secret | default('') | string | trim) | length > 0
+    fail_msg: >-
+      vpn_radsecproxy_enable is true but required settings are missing.
+      Ensure vpn_radsecproxy_local_secret is set, and set vpn_radsecproxy_upstream_host (or provide vpn_radius_servers with at least one entry).
+
+- name: Ensure radsecproxy is installed
+  ansible.builtin.package:
+    name: radsecproxy
+    state: present
+
+- name: Ensure radsecproxy PKI directory exists
+  ansible.builtin.file:
+    path: "{{ vpn_radsecproxy_tls_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Validate radsecproxy TLS files exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _vpn_radsecproxy_tls_stat
+  loop:
+    - "{{ vpn_radsecproxy_tls_ca_file }}"
+    - "{{ vpn_radsecproxy_tls_cert_file }}"
+    - "{{ vpn_radsecproxy_tls_key_file }}"
+
+- name: Fail when radsecproxy TLS files are missing
+  ansible.builtin.assert:
+    that:
+      - (_vpn_radsecproxy_tls_stat.results | selectattr('stat.exists', 'equalto', true) | list | length) == (_vpn_radsecproxy_tls_stat.results | length)
+    fail_msg: >-
+      vpn_radsecproxy_enable is true but TLS files are missing.
+      Provide them as files, or pre-create:
+      - {{ vpn_radsecproxy_tls_ca_file }}
+      - {{ vpn_radsecproxy_tls_cert_file }}
+      - {{ vpn_radsecproxy_tls_key_file }}
+
+- name: Render radsecproxy configuration
+  ansible.builtin.template:
+    src: radsecproxy.conf.j2
+    dest: "{{ vpn_radsecproxy_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    vpn_radsecproxy_upstream_host: "{{ vpn_radsecproxy_upstream_host_effective }}"
+  notify: Restart radsecproxy
+
+- name: Ensure radsecproxy is enabled and running
+  ansible.builtin.service:
+    name: "{{ vpn_radsecproxy_service_name }}"
+    state: started
+    enabled: true

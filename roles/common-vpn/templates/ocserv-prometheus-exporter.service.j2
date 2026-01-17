@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenConnect (ocserv) Prometheus exporter
+After=network.target ocserv.service
+
+[Service]
+Type=simple
+User={{ common_vpn_exporter_user }}
+Group={{ common_vpn_exporter_group }}
+Restart=on-failure
+Environment="OCSERV_EXPORTER_OCCTL={{ common_vpn_exporter_occtl_path }}"
+Environment="OCSERV_EXPORTER_LISTEN_HOST={{ common_vpn_exporter_listen_ip }}"
+Environment="OCSERV_EXPORTER_LISTEN_PORT={{ common_vpn_exporter_listen_port }}"
+Environment="OCSERV_EXPORTER_METRICS_PATH={{ common_vpn_exporter_metrics_path }}"
+Environment="OCSERV_EXPORTER_STATIC_LABELS={{ common_vpn_exporter_static_labels | to_json | replace('\"', '\\\"') }}"
+ExecStart=/usr/local/bin/ocserv_prometheus_exporter.py
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

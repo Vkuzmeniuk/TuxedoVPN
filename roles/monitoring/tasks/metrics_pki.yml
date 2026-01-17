@@ -1,0 +1,228 @@
+---
+# Automatic PKI for TLS/mTLS metrics.
+#
+# Goal:
+# - Generate a private CA on the first mgmt host (and keep it there).
+# - Generate a client cert/key for Prometheus on the mgmt host.
+# - Generate per-host server cert/key for nginx on VPN+mgmt hosts.
+#
+# nginx private keys stay on target hosts. The CA key stays on mgmt.
+
+- name: Determine metrics PKI CA host
+  ansible.builtin.set_fact:
+    _metrics_pki_ca_host: "{{ groups['mgmt'] | first }}"
+  run_once: true
+
+- name: Ensure OpenSSL is installed on metrics PKI CA host
+  ansible.builtin.package:
+    name: openssl
+    state: present
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+
+- name: Ensure metrics CA directory exists on PKI CA host
+  ansible.builtin.file:
+    path: "/etc/tuxedovpn/pki/metrics-ca"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+
+- name: Check metrics CA private key presence
+  ansible.builtin.stat:
+    path: /etc/tuxedovpn/pki/metrics-ca/ca.key
+  register: _metrics_ca_key_stat
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  changed_when: false
+
+- name: Check metrics CA certificate presence
+  ansible.builtin.stat:
+    path: /etc/tuxedovpn/pki/metrics-ca/ca.crt
+  register: _metrics_ca_crt_stat
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  changed_when: false
+
+- name: Fail when metrics CA certificate exists without private key
+  ansible.builtin.assert:
+    that:
+      - not (_metrics_ca_crt_stat.stat.exists | default(false)) or (_metrics_ca_key_stat.stat.exists | default(false))
+    fail_msg: >-
+      Metrics CA certificate exists at /etc/tuxedovpn/pki/metrics-ca/ca.crt but the private key is missing at
+      /etc/tuxedovpn/pki/metrics-ca/ca.key. Restore the key (preferred), or remove the certificate to let Ansible
+      generate a new CA (this will invalidate existing certificates).
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+
+- name: Generate metrics CA private key (first run)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    openssl genrsa -out /etc/tuxedovpn/pki/metrics-ca/ca.key 4096
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  when: not (_metrics_ca_key_stat.stat.exists | default(false))
+  no_log: true
+
+- name: Generate metrics CA certificate (first run)
+  ansible.builtin.command: >
+    openssl req -x509 -new -nodes
+    -key /etc/tuxedovpn/pki/metrics-ca/ca.key
+    -sha256 -days 3650
+    -subj "/CN=TuxedoVPN Metrics CA"
+    -out /etc/tuxedovpn/pki/metrics-ca/ca.crt
+  args:
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  when: not (_metrics_ca_crt_stat.stat.exists | default(false))
+
+- name: Ensure metrics CA file permissions
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "/etc/tuxedovpn/pki/metrics-ca/ca.key", mode: "0600" }
+    - { path: "/etc/tuxedovpn/pki/metrics-ca/ca.crt", mode: "0644" }
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+
+- name: Read metrics CA certificate for distribution
+  ansible.builtin.slurp:
+    path: /etc/tuxedovpn/pki/metrics-ca/ca.crt
+  register: _metrics_ca_slurp
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  changed_when: false
+
+- name: Check Prometheus metrics mTLS client key presence
+  ansible.builtin.stat:
+    path: "{{ prometheus_metrics_tls_key_file }}"
+  register: _prometheus_metrics_client_key_stat
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  changed_when: false
+
+- name: Check Prometheus metrics mTLS client certificate presence
+  ansible.builtin.stat:
+    path: "{{ prometheus_metrics_tls_cert_file }}"
+  register: _prometheus_metrics_client_cert_stat
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  changed_when: false
+
+- name: Fail when Prometheus metrics client certificate exists without private key
+  ansible.builtin.assert:
+    that:
+      - not (_prometheus_metrics_client_cert_stat.stat.exists | default(false)) or (_prometheus_metrics_client_key_stat.stat.exists | default(false))
+    fail_msg: >-
+      Prometheus mTLS client certificate exists at {{ prometheus_metrics_tls_cert_file }} but the private key is missing at
+      {{ prometheus_metrics_tls_key_file }}. Restore the key, or remove the certificate to let Ansible re-issue a new one.
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  when: prometheus_metrics_mtls_enable | default(false) | bool
+
+- name: Ensure Prometheus client key exists (mTLS)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    openssl genrsa -out "{{ prometheus_metrics_tls_key_file }}" 4096
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  when:
+    - prometheus_metrics_mtls_enable | default(false) | bool
+    - not (_prometheus_metrics_client_key_stat.stat.exists | default(false))
+  no_log: true
+
+- name: Generate Prometheus client CSR (mTLS)
+  ansible.builtin.command: >
+    openssl req -new
+    -key "{{ prometheus_metrics_tls_key_file }}"
+    -subj "/CN=prometheus-metrics"
+    -out /etc/tuxedovpn/pki/metrics-ca/prometheus-client.csr
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  when:
+    - prometheus_metrics_mtls_enable | default(false) | bool
+    - not (_prometheus_metrics_client_cert_stat.stat.exists | default(false))
+
+- name: Sign Prometheus client certificate (mTLS)
+  ansible.builtin.command: >
+    openssl x509 -req
+    -in /etc/tuxedovpn/pki/metrics-ca/prometheus-client.csr
+    -CA /etc/tuxedovpn/pki/metrics-ca/ca.crt
+    -CAkey /etc/tuxedovpn/pki/metrics-ca/ca.key
+    -CAcreateserial
+    -CAserial /etc/tuxedovpn/pki/metrics-ca/ca.srl
+    -out "{{ prometheus_metrics_tls_cert_file }}"
+    -days 825 -sha256
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  when:
+    - prometheus_metrics_mtls_enable | default(false) | bool
+    - not (_prometheus_metrics_client_cert_stat.stat.exists | default(false))
+
+- name: Install metrics CA certificate for Prometheus verification
+  ansible.builtin.copy:
+    dest: "{{ prometheus_metrics_tls_ca_file }}"
+    content: "{{ _metrics_ca_slurp.content | b64decode }}"
+    owner: prometheus
+    group: prometheus
+    mode: "0644"
+    force: false
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+
+- name: Ensure Prometheus metrics CA file permissions
+  ansible.builtin.file:
+    path: "{{ prometheus_metrics_tls_ca_file }}"
+    owner: prometheus
+    group: prometheus
+    mode: "0644"
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+
+- name: Ensure Prometheus client cert permissions (mTLS)
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: prometheus
+    group: prometheus
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ prometheus_metrics_tls_cert_file }}", mode: "0644" }
+    - { path: "{{ prometheus_metrics_tls_key_file }}",  mode: "0640" }
+  delegate_to: "{{ _metrics_pki_ca_host }}"
+  run_once: true
+  when: prometheus_metrics_mtls_enable | default(false) | bool
+
+- name: Build metrics TLS server host list
+  ansible.builtin.set_fact:
+    _metrics_server_hosts: "{{ (groups['vpn'] | default([])) + (groups['mgmt'] | default([])) }}"
+  run_once: true
+
+- name: Ensure OpenSSL is installed on metrics server hosts
+  ansible.builtin.package:
+    name: openssl
+    state: present
+  delegate_to: "{{ item }}"
+  loop: "{{ _metrics_server_hosts }}"
+  run_once: true
+
+- name: Issue metrics TLS server certificates (nginx proxies)
+  ansible.builtin.include_tasks: metrics_pki_issue_server.yml
+  loop: "{{ _metrics_server_hosts }}"
+  loop_control:
+    loop_var: metrics_server_host
+    label: "{{ metrics_server_host }}"
+  vars:
+    metrics_pki_ca_host: "{{ _metrics_pki_ca_host }}"
+    metrics_ca_cert_pem: "{{ _metrics_ca_slurp.content | b64decode }}"
+  run_once: true

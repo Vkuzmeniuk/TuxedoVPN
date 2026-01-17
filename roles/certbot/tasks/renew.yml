@@ -1,0 +1,113 @@
+---
+- name: Collect service facts (standalone)
+  ansible.builtin.service_facts:
+  when:
+    - (certbot_method | default('')) == "standalone"
+    - (certbot_standalone_stop_services | default([]) | length) > 0
+
+- name: Prevent unsupported TLS-ALPN preference in standalone mode
+  ansible.builtin.assert:
+    that:
+      - "'tls-alpn-01' not in (certbot_extra_args | default([]))"
+      - "'tls-alpn' not in (certbot_extra_args | default([]))"
+    fail_msg: >-
+      certbot_method=standalone supports HTTP-01 only (tcp/80) with the packaged Certbot.
+      Remove tls-alpn from certbot_extra_args or switch to DNS-01 (certbot_method=dns + certbot_auth_args).
+  when: (certbot_method | default('')) == "standalone"
+
+- name: Renew certificates via certbot (with optional standalone pre-stop)
+  block:
+    - name: Determine iptables chain for temporary HTTP-01 allow
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if iptables -S ufw-user-input >/dev/null 2>&1; then
+          echo ufw-user-input
+        else
+          echo INPUT
+        fi
+      args:
+        executable: /bin/bash
+      register: _certbot_http01_chain
+      changed_when: false
+      when: (certbot_method | default('')) == "standalone"
+
+    - name: Check temporary HTTP-01 allow rule (tcp/80)
+      ansible.builtin.command: >-
+        iptables -C {{ _certbot_http01_chain.stdout }}
+        -p tcp --dport 80
+        -m comment --comment tuxedovpn-certbot-http01
+        -j ACCEPT
+      register: _certbot_http01_rule_check
+      changed_when: false
+      failed_when: false
+      when: (certbot_method | default('')) == "standalone"
+
+    - name: Insert temporary HTTP-01 allow rule (tcp/80)
+      ansible.builtin.command: >-
+        iptables -I {{ _certbot_http01_chain.stdout }} 1
+        -p tcp --dport 80
+        -m comment --comment tuxedovpn-certbot-http01
+        -j ACCEPT
+      register: _certbot_http01_rule_add
+      changed_when: true
+      when:
+        - (certbot_method | default('')) == "standalone"
+        - (_certbot_http01_rule_check.rc | default(1) | int) != 0
+
+    - name: Stop services for standalone renew (to free the port)
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: stopped
+      loop: "{{ certbot_standalone_stop_services | default([]) }}"
+      register: _certbot_standalone_stop
+      when:
+        - (certbot_method | default('')) == "standalone"
+        - (certbot_standalone_stop_services | default([]) | length) > 0
+        - >
+          (ansible_facts.services[item ~ '.service'] is defined)
+          or (ansible_facts.services[item] is defined)
+
+    - name: Compute services to restart after standalone renew
+      ansible.builtin.set_fact:
+        _certbot_standalone_services_to_restart: >-
+          {{
+            (_certbot_standalone_stop.results | default([]))
+            | selectattr('changed', 'equalto', true)
+            | map(attribute='item')
+            | list
+          }}
+      when:
+        - (certbot_method | default('')) == "standalone"
+        - (certbot_standalone_stop_services | default([]) | length) > 0
+      changed_when: false
+
+    - name: Renew certificates via certbot
+      ansible.builtin.command: >-
+        certbot renew
+        --non-interactive
+        {% if certbot_staging | bool %} --staging {% endif %}
+        {{ (certbot_extra_args | default([])) | join(' ') }}
+      register: _certbot_renew
+      changed_when: >-
+        ('No renewals were attempted' not in (_certbot_renew.stdout | default('')))
+  always:
+    - name: Start services stopped for standalone renew
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+      loop: "{{ _certbot_standalone_services_to_restart | default([]) }}"
+      when:
+        - (certbot_method | default('')) == "standalone"
+        - (_certbot_standalone_services_to_restart | default([]) | length) > 0
+
+    - name: Remove temporary HTTP-01 allow rule (tcp/80)
+      ansible.builtin.command: >-
+        iptables -D {{ _certbot_http01_chain.stdout }}
+        -p tcp --dport 80
+        -m comment --comment tuxedovpn-certbot-http01
+        -j ACCEPT
+      changed_when: true
+      failed_when: false
+      when:
+        - (certbot_method | default('')) == "standalone"
+        - (_certbot_http01_rule_check.rc | default(0) | int) != 0

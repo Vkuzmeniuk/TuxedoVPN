@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Managed by Ansible (role: certbot)
+# Called by certbot after renewals when using standalone mode.
+#
+# Starts only services that were stopped by the pre-hook.
+
+STATE_FILE="/run/tuxedovpn-certbot-standalone-stopped-services"
+if [[ ! -f "${STATE_FILE}" ]]; then
+  exit 0
+fi
+
+RULE_COMMENT="tuxedovpn-certbot-http01"
+CHAIN=""
+
+while IFS= read -r line; do
+  [[ -z "${line}" ]] && continue
+  if [[ "${line}" == iptables:* ]]; then
+    CHAIN="${line#iptables:}"
+    continue
+  fi
+  systemctl start "${line}" >/dev/null 2>&1 || true
+done < "${STATE_FILE}"
+
+if [[ -n "${CHAIN}" ]] && command -v iptables >/dev/null 2>&1; then
+  iptables -D "${CHAIN}" -p tcp --dport 80 -m comment --comment "${RULE_COMMENT}" -j ACCEPT >/dev/null 2>&1 || true
+fi
+
+rm -f "${STATE_FILE}"

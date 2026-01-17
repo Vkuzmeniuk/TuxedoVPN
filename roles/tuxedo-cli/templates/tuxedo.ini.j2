@@ -1,0 +1,12 @@
+[postgres]
+dsn = dbname={{ tuxedo_cli_pg_db }} user={{ tuxedo_cli_pg_user }} host={{ tuxedo_cli_pg_host }} port={{ tuxedo_cli_pg_port }} sslmode={{ tuxedo_cli_pg_sslmode }}
+connect_timeout_seconds = {{ tuxedo_cli_pg_connect_timeout_seconds }}
+statement_timeout_seconds = {{ tuxedo_cli_pg_statement_timeout_seconds }}
+
+[freeradius]
+radcheck_table = {{ tuxedo_cli_radcheck_table }}
+radusergroup_table = {{ tuxedo_cli_radusergroup_table }}
+blocklist_table = {{ tuxedo_cli_blocklist_table }}
+groups_table = {{ tuxedo_cli_groups_table }}
+default_group_name = {{ tuxedo_cli_default_group_name }}
+default_group_priority = {{ tuxedo_cli_default_group_priority }}

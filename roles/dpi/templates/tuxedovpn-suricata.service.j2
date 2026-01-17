@@ -1,0 +1,15 @@
+[Unit]
+Description=TuxedoVPN Suricata (NFQUEUE sensor)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/suricata -c {{ dpi_suricata_config_path }} -q {{ dpi_suricata_queue_num_effective | default(dpi_suricata_queue_num) | int }}
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

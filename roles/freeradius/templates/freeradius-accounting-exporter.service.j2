@@ -1,0 +1,35 @@
+[Unit]
+Description=FreeRADIUS accounting exporter (radacct -> Prometheus)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ freeradius_accounting_exporter_user | default('postgres') }}
+Group={{ freeradius_accounting_exporter_group | default('postgres') }}
+ExecStart=/usr/bin/python3 /usr/local/bin/freeradius_accounting_exporter.py
+Restart=on-failure
+RestartSec=3
+
+Environment=FREERADIUS_ACCT_EXPORTER_LISTEN_HOST={{ freeradius_accounting_exporter_listen_ip | default('127.0.0.1') }}
+Environment=FREERADIUS_ACCT_EXPORTER_LISTEN_PORT={{ freeradius_accounting_exporter_listen_port | default(9814) }}
+Environment=FREERADIUS_ACCT_EXPORTER_METRICS_PATH={{ freeradius_accounting_exporter_metrics_path | default('/metrics') }}
+Environment=FREERADIUS_ACCT_EXPORTER_DB_NAME={{ freeradius_db_name | default('radius') }}
+Environment=FREERADIUS_ACCT_EXPORTER_TOP_N={{ freeradius_accounting_exporter_top_n | default(0) }}
+Environment=FREERADIUS_ACCT_EXPORTER_SPLIT_BY_NAS={{ (freeradius_accounting_exporter_split_by_nas | default(false) | bool) | ternary('1','0') }}
+Environment=FREERADIUS_ACCT_EXPORTER_CONNECT_TIMEOUT={{ freeradius_accounting_exporter_connect_timeout | default(2) }}
+Environment=FREERADIUS_ACCT_EXPORTER_STATEMENT_TIMEOUT={{ freeradius_accounting_exporter_statement_timeout | default(5) }}
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

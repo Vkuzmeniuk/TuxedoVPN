@@ -1,0 +1,23 @@
+{% set radius_ds_enabled = grafana_enable_freeradius_datasource | default(false) | bool %}
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://localhost:9090
+    isDefault: true
+    editable: true
+{% if radius_ds_enabled %}
+  - name: "{{ grafana_freeradius_datasource_name | default('FreeRADIUS') }}"
+    type: postgres
+    access: proxy
+    url: "{{ grafana_freeradius_datasource_host | default('127.0.0.1') }}:{{ grafana_freeradius_datasource_port | default(5432) }}"
+    database: "{{ grafana_freeradius_datasource_database | default(freeradius_db_name | default('radius')) }}"
+    user: "{{ grafana_freeradius_datasource_user | default(freeradius_db_user | default('radius')) }}"
+    editable: true
+    jsonData:
+      sslmode: "{{ grafana_freeradius_datasource_sslmode | default('disable') }}"
+      postgresVersion: {{ grafana_freeradius_datasource_postgres_version | default(1400) }}
+    secureJsonData:
+      password: "{{ grafana_freeradius_datasource_password | default(freeradius_db_password | default('change_me_radius_db')) }}"
+{% endif %}

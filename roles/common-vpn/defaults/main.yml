@@ -1,0 +1,177 @@
+# ===== Certificates =====
+vpn_domain: "{{ private_vpn_domain | default('vpn.example.local') }}"
+vpn_cert_use_existing: "{{ private_vpn_use_existing_cert | default(false) }}"
+vpn_cert_fullchain: "{{ private_vpn_cert_fullchain | default('/etc/letsencrypt/live/' ~ vpn_domain ~ '/fullchain.pem') }}"
+vpn_cert_key: "{{ private_vpn_cert_key | default('/etc/letsencrypt/live/' ~ vpn_domain ~ '/privkey.pem') }}"
+vpn_cert_selfsigned_dir: "{{ private_vpn_selfsigned_dir | default('/etc/ocserv/certs') }}"
+
+# ===== Authentication (RADIUS / local) =====
+vpn_auth_mode: "{{ private_vpn_auth | default('radius') }}"  # local | radius
+vpn_ocpasswd_file: "{{ private_vpn_ocpasswd_file | default('/etc/ocserv/ocpasswd') }}"
+vpn_radius_config: "{{ private_vpn_radius_config | default('/etc/radcli/radiusclient.conf') }}"
+vpn_radius_accounting: "{{ private_vpn_radius_acct | default(false) }}"
+vpn_radius_servers: "{{ private_vpn_radius_servers | default([]) }}"
+vpn_radius_nas_identifier: "{{ private_vpn_radius_nas_identifier | default(inventory_hostname) }}"
+vpn_radius_packages: "{{ private_vpn_radius_packages | default(['libradcli4']) }}"
+
+# ===== Listener / process =====
+vpn_listen_port: "{{ private_vpn_listen_port | default(443) }}"
+vpn_listen_host: "{{ private_vpn_listen_host | default('0.0.0.0') }}"
+vpn_listen_proxy_proto: "{{ private_vpn_listen_proxy_proto | default(false) }}"
+
+vpn_run_user: "{{ private_vpn_run_user | default('nobody') }}"
+vpn_run_group: "{{ private_vpn_run_group | default('daemon') }}"
+vpn_isolate_workers: "{{ private_vpn_isolate_workers | default(true) }}"
+
+vpn_socket_file: "{{ private_vpn_socket_file | default('/run/ocserv.socket') }}"
+vpn_pid_file: "{{ private_vpn_pid_file | default('/run/ocserv.pid') }}"
+vpn_log_file: "{{ private_vpn_log_file | default('/var/log/ocserv.log') }}"
+
+# ===== Limits / timers =====
+vpn_max_clients: "{{ private_vpn_max_clients | default(0) }}"
+vpn_max_same_clients: "{{ private_vpn_max_same_clients | default(2) }}"
+vpn_stats_reset_time: "{{ private_vpn_stats_reset_time | default(604800) }}"
+vpn_stats_report_time: "{{ private_vpn_stats_report_time | default(300) }}"
+
+vpn_keepalive: "{{ private_vpn_keepalive | default(600) }}"
+vpn_dpd: "{{ private_vpn_dpd | default(60) }}"
+vpn_mobile_dpd: "{{ private_vpn_mobile_dpd | default(300) }}"
+vpn_switch_to_tcp_timeout: "{{ private_vpn_switch_to_tcp_timeout | default(25) }}"
+
+vpn_try_mtu_discovery: "{{ private_vpn_try_mtu_discovery | default(true) }}"
+vpn_cert_user_oid: "{{ private_vpn_cert_user_oid | default('0.9.2342.19200300.100.1.1') }}"
+
+vpn_enable_compression: "{{ private_vpn_enable_compression | default(true) }}"
+vpn_no_compress_limit: "{{ private_vpn_no_compress_limit | default(256) }}"
+
+vpn_tls_priorities: "{{ private_vpn_tls_priorities | default('NORMAL:%SERVER_PRECEDENCE:%COMPAT:-RSA:-VERS-SSL3.0:-ARCFOUR-128:-VERS-TLS1.0:-VERS-TLS1.1') }}"
+vpn_tls_priorities_alt: "{{ private_vpn_tls_priorities_alt | default('SECURE256:%SERVER_PRECEDENCE:%COMPAT:-RSA:-VERS-SSL3.0:-ARCFOUR-128:-VERS-TLS1.0:-VERS-TLS1.1') }}"
+
+vpn_auth_timeout: "{{ private_vpn_auth_timeout | default(240) }}"
+vpn_idle_timeout: "{{ private_vpn_idle_timeout | default(600) }}"
+vpn_mobile_idle_timeout: "{{ private_vpn_mobile_idle_timeout | default(900) }}"
+vpn_min_reauth_time: "{{ private_vpn_min_reauth_time | default(300) }}"
+
+vpn_ban: "{{ private_vpn_ban | default({'max_score': 80, 'reset_time': 300}) }}"
+
+vpn_cookie_timeout: "{{ private_vpn_cookie_timeout | default(300) }}"
+vpn_deny_roaming: "{{ private_vpn_deny_roaming | default(false) }}"
+
+vpn_rekey_time: "{{ private_vpn_rekey_time | default(172800) }}"
+vpn_rekey_method: "{{ private_vpn_rekey_method | default('ssl') }}"
+
+vpn_use_occtl: "{{ private_vpn_use_occtl | default(true) }}"
+
+# ===== Logs / device =====
+vpn_log_level: "{{ private_vpn_log_level | default(3) }}"
+vpn_device: "{{ private_vpn_device | default('vpns') }}"
+vpn_predictable_ips: "{{ private_vpn_predictable_ips | default(true) }}"
+
+# ===== DNS / IP pool =====
+vpn_default_domain: "{{ default_vpn_domain | default(private_vpn_domain | default(vpn_domain)) }}"
+vpn_tunnel_all_dns: "{{ private_vpn_tunnel_all_dns | default(true) }}"
+vpn_dns_servers: "{{ private_vpn_dns | default([]) }}"
+
+vpn_ipv4_network: "{{ private_vpn_ipv4_network | default('10.66.3.0') }}"
+vpn_ipv4_netmask: "{{ private_vpn_ipv4_netmask | default('255.255.255.0') }}"
+vpn_ping_leases: "{{ private_vpn_ping_leases | default(false) }}"
+
+# ===== Split tunneling / routes =====
+# By default we advertise a full-tunnel route (route = default).
+# To enable split-tunneling, set vpn_route_all_traffic=false and populate vpn_routes.
+vpn_route_all_traffic: true
+vpn_routes: []
+vpn_no_routes: []
+vpn_split_dns_domains: []
+
+# ===== AnyConnect compatibility =====
+vpn_cisco_client_compat: "{{ private_vpn_cisco_client_compat | default(true) }}"
+vpn_cisco_svc_client_compat: "{{ private_vpn_cisco_svc_client_compat | default(false) }}"
+vpn_client_bypass_protocol: "{{ private_vpn_client_bypass_protocol | default(false) }}"
+vpn_dtls_legacy: "{{ private_vpn_dtls_legacy | default(true) }}"
+
+# ===== Camouflage =====
+vpn_camouflage_enabled: >-
+  {{
+    private_vpn_camouflage_enabled
+    | default(public_vpn_camouflage_enabled, true)
+    | default(true)
+  }}
+vpn_camouflage_secret: >-
+  {{
+    vpn_camouflage_secret_override
+    | default(private_vpn_camouflage_secret, true)
+    | default(public_vpn_camouflage_secret, true)
+    | default('changeme_camouflage')
+  }}
+vpn_camouflage_realm: >-
+  {{
+    private_vpn_camouflage_realm
+    | default(public_vpn_camouflage_realm, true)
+    | default('Restricted Content')
+  }}
+
+# ===== Additional HTTP headers =====
+vpn_http_headers: "{{ private_vpn_http_headers | default([
+  'Strict-Transport-Security: max-age=31536000 ; includeSubDomains',
+  'X-Frame-Options: deny',
+  'X-Content-Type-Options: nosniff',
+  \"Content-Security-Policy: default-src 'none'\",
+  'X-Permitted-Cross-Domain-Policies: none',
+  'Referrer-Policy: no-referrer',
+  'Clear-Site-Data: \"cache\",\"cookies\",\"storage\"',
+  'Cross-Origin-Embedder-Policy: require-corp',
+  'Cross-Origin-Opener-Policy: same-origin',
+  'Cross-Origin-Resource-Policy: same-origin',
+  'X-XSS-Protection: 0',
+  'Pragma: no-cache',
+  'Cache-control: no-store, no-cache']) }}"
+
+# ===== Derived certificate paths for templates (set in tasks via set_fact)
+#   _ocserv_cert_fullchain: (existing ? vpn_cert_fullchain : selfsigned/server-cert.pem)
+#   _ocserv_cert_key:       (existing ? vpn_cert_key       : selfsigned/server-key.pem)
+
+vpn_manage_users: "{{ private_vpn_user_manage | default(true) }}"
+vpn_default_user_name: "{{ private_vpn_user_name | default('support') }}"
+vpn_default_user_password: "{{ private_vpn_user_password | default('') }}"
+
+vpn_nat_subnets: "{{ private_vpn_nat_subnets | default(['10.66.3.0/24']) }}"
+
+vpn_uplink_iface: "{{ private_vpn_uplink_iface | default('') }}"
+vpn_enable_mangle: "{{ private_vpn_enable_mangle | default(false) }}"
+
+vpn_connection_test_enable: true
+vpn_connection_test_address: "127.0.0.1"
+
+common_vpn_sysctl_enable: true
+common_vpn_sysctl_config_path: "/etc/sysctl.d/60-common-vpn.conf"
+common_vpn_sysctl_config_candidates:
+  - "/etc/sysctl.d/60-common-vpn.conf"
+  - "/etc/sysctl.conf"
+common_vpn_sysctl_defaults:
+  net.ipv4.ip_forward: 1
+  net.core.default_qdisc: "fq"
+  net.ipv4.tcp_congestion_control: "bbr"
+common_vpn_sysctl_overrides: {}
+
+# ===== Observability =====
+common_vpn_exporter_enable: true
+common_vpn_exporter_user: "root"
+common_vpn_exporter_group: "root"
+common_vpn_exporter_listen_ip: "0.0.0.0"
+common_vpn_exporter_listen_port: 9813
+common_vpn_exporter_metrics_path: "/metrics"
+common_vpn_exporter_occtl_path: "/usr/bin/occtl"
+common_vpn_exporter_static_labels:
+  nodename: "{{ ansible_nodename | default(ansible_hostname) | default(inventory_hostname) }}"
+
+# ===== Template defaults =====
+common_vpn_template_src: "{{ role_path }}/templates/ocserv.conf.j2"
+common_vpn_before_rules_marker: "COMMON_VPN_BASELINE v4"
+common_vpn_allow_early_ssh: true
+common_vpn_allow_dns: true
+common_vpn_allow_ntp: true
+common_vpn_allow_mdns: true
+common_vpn_allow_upnp: true
+common_vpn_forward_extra_subnets: []
+common_vpn_forward_extra_subnets6: []

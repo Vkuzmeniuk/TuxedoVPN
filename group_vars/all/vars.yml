@@ -1,0 +1,67 @@
+ansible_ssh_private_key_file: ~/.ssh/ansible_ed25519
+timezone: "UTC"
+
+# TLS certificates
+# - selfsigned: roles generate local self-signed certificates (default)
+# - certbot: use Let’s Encrypt certificates from /etc/letsencrypt/live/...
+# Recommended to set per host in `host_vars/<host>.yml`:
+# tuxedovpn_tls_mode: "selfsigned" # selfsigned | certbot
+
+admin_user: "support"
+admin_ssh_authorized_keys:
+  - "{{ lookup('file', lookup('env','HOME') + '/.ssh/ansible_ed25519.pub') }}"
+
+common_fail2ban_enable: true
+
+apt_lock_timeout: 600
+apt_wait_timeout: 10
+apt_wait_poll_interval: 5
+apt_wait_report_interval: 30
+
+# Reduce contention with background apt jobs after the first boot/reboot.
+apt_disable_auto_updates_during_run: true
+
+# Allow `admin_user` to SSH with a password by setting a deterministic password hash from vault.
+# If password logins are not needed, set this to `false`.
+admin_user_manage_password: true
+admin_user_password_plain: "{{ ansible_become_password | default('') }}"
+
+# Default VPN user credentials (RADIUS/local).
+vpn_default_user_name: "support"
+vpn_default_user_password: "{{ vault_vpn_default_user_password | default('') }}"
+
+common_packages:
+  - vim
+  - htop
+  - curl
+  - wget
+  - net-tools
+  - chrony
+  - fail2ban
+
+# node_exporter is deployed by a separate role
+prometheus_node_exporter_enable: true
+node_exporter_port: 9100
+ocserv_exporter_port: 9813
+dpi_agent_port: 9815
+
+radius_shared_secret: "{{ vault_radius_shared_secret | default('change_me_radius_secret') }}"
+freeradius_db_password: "{{ vault_freeradius_db_password | default('change_me_radius_db') }}"
+
+# DPI: token for the mgmt webhook (VPN -> mgmt).
+dpi_mgmt_webhook_token: "{{ vault_dpi_webhook_token | default('') }}"
+
+# Inventory groups for the management server and VPN nodes (leave as-is unless you change the inventory)
+mgmt_wireguard_mgmt_group: mgmt
+mgmt_wireguard_vpn_group: vpn
+
+# Tunnel settings
+mgmt_wireguard_interface: wg-mgmt      # interface name
+mgmt_wireguard_port: 51820             # port the management server listens on
+mgmt_wireguard_address_mgmt: 10.202.0.1/24  # management server address (VPN nodes get addresses automatically)
+mgmt_wireguard_auto_assign_vpn_addresses: true
+mgmt_wireguard_vpn_ip_start: 2
+mgmt_wireguard_persistent_keepalive: 25     # keepalive interval for NAT
+
+# Derived values
+mgmt_wireguard_mgmt_ip: "{{ mgmt_wireguard_address_mgmt | regex_replace('/.*$', '') }}"

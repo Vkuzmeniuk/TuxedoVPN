@@ -1,0 +1,4 @@
+{# radcli matches servers strictly by host, so ports are configured in radiusclient.conf #}
+{% for server in vpn_radius_servers %}
+{{ server.host }} {{ server.secret }}
+{% endfor %}

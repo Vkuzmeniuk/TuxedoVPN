@@ -1,0 +1,321 @@
+---
+# RadSec listener support (RADIUS over TLS).
+#
+# Certificates/keys are expected as files on the target host. This repo
+# can generate and distribute them automatically (see docs/security-hardening.md).
+
+- name: Determine RadSec PKI CA host
+  ansible.builtin.set_fact:
+    _radsec_pki_ca_host: "{{ groups['mgmt'] | first }}"
+  run_once: true
+
+- name: Ensure OpenSSL is installed on RadSec PKI CA host
+  ansible.builtin.package:
+    name: openssl
+    state: present
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  run_once: true
+
+- name: Ensure RadSec CA directory exists on PKI CA host
+  ansible.builtin.file:
+    path: "/etc/tuxedovpn/pki/radsec-ca"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  run_once: true
+
+- name: Check RadSec CA private key presence
+  ansible.builtin.stat:
+    path: /etc/tuxedovpn/pki/radsec-ca/ca.key
+  register: _radsec_ca_key_stat
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  run_once: true
+  changed_when: false
+
+- name: Check RadSec CA certificate presence
+  ansible.builtin.stat:
+    path: /etc/tuxedovpn/pki/radsec-ca/ca.crt
+  register: _radsec_ca_crt_stat
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  run_once: true
+  changed_when: false
+
+- name: Fail when RadSec CA certificate exists without private key
+  ansible.builtin.assert:
+    that:
+      - not (_radsec_ca_crt_stat.stat.exists | default(false)) or (_radsec_ca_key_stat.stat.exists | default(false))
+    fail_msg: >-
+      RadSec CA certificate exists at /etc/tuxedovpn/pki/radsec-ca/ca.crt but the private key is missing at
+      /etc/tuxedovpn/pki/radsec-ca/ca.key. Restore the key (preferred), or remove the certificate to let Ansible
+      generate a new CA (this will invalidate existing certificates).
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  run_once: true
+
+- name: Generate RadSec CA private key (first run)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    openssl genrsa -out /etc/tuxedovpn/pki/radsec-ca/ca.key 4096
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  run_once: true
+  when: not (_radsec_ca_key_stat.stat.exists | default(false))
+  no_log: true
+
+- name: Generate RadSec CA certificate (first run)
+  ansible.builtin.command: >
+    openssl req -x509 -new -nodes
+    -key /etc/tuxedovpn/pki/radsec-ca/ca.key
+    -sha256 -days 3650
+    -subj "/CN=TuxedoVPN RadSec CA"
+    -out /etc/tuxedovpn/pki/radsec-ca/ca.crt
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  run_once: true
+  when: not (_radsec_ca_crt_stat.stat.exists | default(false))
+
+- name: Ensure RadSec CA file permissions
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "/etc/tuxedovpn/pki/radsec-ca/ca.key", mode: "0600" }
+    - { path: "/etc/tuxedovpn/pki/radsec-ca/ca.crt", mode: "0644" }
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  run_once: true
+
+- name: Read RadSec CA certificate for distribution
+  ansible.builtin.slurp:
+    path: /etc/tuxedovpn/pki/radsec-ca/ca.crt
+  register: _radsec_ca_slurp
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  run_once: true
+  changed_when: false
+
+- name: Ensure RadSec PKI directory exists
+  ansible.builtin.file:
+    path: "{{ freeradius_radsec_tls_dir }}"
+    state: directory
+    owner: root
+    group: freerad
+    mode: "0750"
+
+- name: Install RadSec CA certificate for client verification on RADIUS server
+  ansible.builtin.copy:
+    dest: "{{ freeradius_radsec_tls_ca_file }}"
+    content: "{{ _radsec_ca_slurp.content | b64decode }}"
+    owner: root
+    group: freerad
+    mode: "0640"
+    force: false
+  when: freeradius_radsec_require_client_cert | default(true) | bool
+  notify: Restart FreeRADIUS
+
+- name: Ensure RadSec CA file permissions on RADIUS server
+  ansible.builtin.file:
+    path: "{{ freeradius_radsec_tls_ca_file }}"
+    owner: root
+    group: freerad
+    mode: "0640"
+  when: freeradius_radsec_require_client_cert | default(true) | bool
+  notify: Restart FreeRADIUS
+
+- name: Check if RadSec server certificate already exists
+  ansible.builtin.stat:
+    path: "{{ freeradius_radsec_tls_cert_file }}"
+  register: _radsec_server_cert_stat
+  changed_when: false
+
+- name: Check if RadSec server private key already exists
+  ansible.builtin.stat:
+    path: "{{ freeradius_radsec_tls_key_file }}"
+  register: _radsec_server_key_stat
+  changed_when: false
+
+- name: Fail when RadSec server certificate exists without private key
+  ansible.builtin.assert:
+    that:
+      - not (_radsec_server_cert_stat.stat.exists | default(false)) or (_radsec_server_key_stat.stat.exists | default(false))
+    fail_msg: >-
+      RadSec server certificate exists at {{ freeradius_radsec_tls_cert_file }} but the private key is missing at
+      {{ freeradius_radsec_tls_key_file }}. Restore the key, or remove the certificate to let Ansible re-issue a new one.
+
+- name: Ensure RadSec server private key exists (first run)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    openssl genrsa -out "{{ freeradius_radsec_tls_key_file }}" 4096
+  args:
+    executable: /bin/bash
+  when:
+    - not (_radsec_server_cert_stat.stat.exists | default(false))
+    - not (_radsec_server_key_stat.stat.exists | default(false))
+  no_log: true
+  notify: Restart FreeRADIUS
+
+- name: Render OpenSSL CSR config for RadSec server certificate
+  ansible.builtin.copy:
+    dest: "{{ freeradius_radsec_tls_dir }}/server.cnf"
+    owner: root
+    group: freerad
+    mode: "0640"
+    content: |
+      [req]
+      distinguished_name = dn
+      req_extensions = req_ext
+      prompt = no
+
+      [dn]
+      CN = {{ inventory_hostname }}
+
+      [req_ext]
+      subjectAltName = @alt_names
+
+      [alt_names]
+      {% set ip_candidates = [
+          (mgmt_wireguard_wireguard_ip | default('')),
+          (ansible_default_ipv4.address | default('')),
+          (ansible_host | default(''))
+        ] %}
+      {% set ips = (ip_candidates | select('match', '^\\d+\\.\\d+\\.\\d+\\.\\d+$') | list | unique) %}
+      {% for ip in ips %}
+      IP.{{ loop.index }} = {{ ip }}
+      {% endfor %}
+      DNS.1 = {{ inventory_hostname }}
+  when: not (_radsec_server_cert_stat.stat.exists | default(false))
+
+- name: Generate RadSec server CSR (first run)
+  ansible.builtin.command: >
+    openssl req -new
+    -key "{{ freeradius_radsec_tls_key_file }}"
+    -out "{{ freeradius_radsec_tls_dir }}/server.csr"
+    -config "{{ freeradius_radsec_tls_dir }}/server.cnf"
+  when: not (_radsec_server_cert_stat.stat.exists | default(false))
+
+- name: Read RadSec server CSR for signing (first run)
+  ansible.builtin.slurp:
+    path: "{{ freeradius_radsec_tls_dir }}/server.csr"
+  register: _radsec_server_csr_slurp
+  changed_when: false
+  when: not (_radsec_server_cert_stat.stat.exists | default(false))
+
+- name: Read RadSec server extfile for signing (first run)
+  ansible.builtin.slurp:
+    path: "{{ freeradius_radsec_tls_dir }}/server.cnf"
+  register: _radsec_server_ext_slurp
+  changed_when: false
+  when: not (_radsec_server_cert_stat.stat.exists | default(false))
+
+- name: Stage RadSec server CSR on CA host (first run)
+  ansible.builtin.copy:
+    dest: "/tmp/tuxedovpn-radsec-{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}.csr"
+    content: "{{ _radsec_server_csr_slurp.content | b64decode }}"
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  when: not (_radsec_server_cert_stat.stat.exists | default(false))
+
+- name: Stage RadSec server extfile on CA host (first run)
+  ansible.builtin.copy:
+    dest: "/tmp/tuxedovpn-radsec-{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}.cnf"
+    content: "{{ _radsec_server_ext_slurp.content | b64decode }}"
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  when: not (_radsec_server_cert_stat.stat.exists | default(false))
+
+- name: Sign RadSec server certificate on CA host (first run)
+  ansible.builtin.command: >
+    openssl x509 -req
+    -in /tmp/tuxedovpn-radsec-{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}.csr
+    -CA /etc/tuxedovpn/pki/radsec-ca/ca.crt
+    -CAkey /etc/tuxedovpn/pki/radsec-ca/ca.key
+    -CAcreateserial
+    -CAserial /etc/tuxedovpn/pki/radsec-ca/ca.srl
+    -out /tmp/tuxedovpn-radsec-{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}.crt
+    -days 825 -sha256
+    -extensions req_ext
+    -extfile /tmp/tuxedovpn-radsec-{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}.cnf
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  when: not (_radsec_server_cert_stat.stat.exists | default(false))
+  no_log: true
+
+- name: Read signed RadSec server certificate (first run)
+  ansible.builtin.slurp:
+    path: "/tmp/tuxedovpn-radsec-{{ inventory_hostname | regex_replace('[^A-Za-z0-9_.-]', '_') }}.crt"
+  register: _radsec_server_cert_slurp
+  delegate_to: "{{ _radsec_pki_ca_host }}"
+  when: not (_radsec_server_cert_stat.stat.exists | default(false))
+  changed_when: false
+
+- name: Install signed RadSec server certificate (first run)
+  ansible.builtin.copy:
+    dest: "{{ freeradius_radsec_tls_cert_file }}"
+    content: "{{ _radsec_server_cert_slurp.content | b64decode }}"
+    owner: root
+    group: freerad
+    mode: "0640"
+  when: not (_radsec_server_cert_stat.stat.exists | default(false))
+  notify: Restart FreeRADIUS
+
+- name: Ensure RadSec server key/cert permissions
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: freerad
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ freeradius_radsec_tls_key_file }}", mode: "0640" }
+    - { path: "{{ freeradius_radsec_tls_cert_file }}", mode: "0640" }
+  notify: Restart FreeRADIUS
+
+- name: Validate RadSec TLS files exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _freeradius_radsec_tls_stat
+  loop:
+    - "{{ freeradius_radsec_tls_cert_file }}"
+    - "{{ freeradius_radsec_tls_key_file }}"
+
+- name: Fail when RadSec TLS files are missing
+  ansible.builtin.assert:
+    that:
+      - (_freeradius_radsec_tls_stat.results | selectattr('stat.exists', 'equalto', true) | list | length) == (_freeradius_radsec_tls_stat.results | length)
+    fail_msg: >-
+      RadSec is enabled, but the TLS certificate/key files are missing.
+      Provide them as files, or pre-create:
+      - {{ freeradius_radsec_tls_cert_file }}
+      - {{ freeradius_radsec_tls_key_file }}
+
+- name: Validate RadSec CA file exists when client certs are required
+  ansible.builtin.stat:
+    path: "{{ freeradius_radsec_tls_ca_file }}"
+  register: _freeradius_radsec_ca_stat
+  when: freeradius_radsec_require_client_cert | default(true) | bool
+
+- name: Ensure RadSec client certificates exist on VPN hosts (for radsecproxy)
+  ansible.builtin.include_tasks: radsec_clients.yml
+  loop: "{{ groups['vpn'] | default([]) }}"
+  loop_control:
+    loop_var: radsec_client_host
+    label: "{{ radsec_client_host }}"
+  vars:
+    radsec_pki_ca_host: "{{ _radsec_pki_ca_host }}"
+    radsec_ca_cert_pem: "{{ _radsec_ca_slurp.content | b64decode }}"
+  when: (groups['vpn'] | default([])) | length > 0
+  run_once: true
+
+- name: Fail when RadSec CA file is missing (client cert required)
+  ansible.builtin.assert:
+    that:
+      - _freeradius_radsec_ca_stat.stat.exists | default(false)
+    fail_msg: >-
+      RadSec is configured to require client certificates, but ca_file is missing at {{ freeradius_radsec_tls_ca_file }}.
+      Provide it as a file.
+  when: freeradius_radsec_require_client_cert | default(true) | bool

@@ -1,0 +1,90 @@
+---
+- name: Set timezone
+  community.general.timezone:
+    name: "{{ timezone }}"
+
+- name: Ensure hostname resolves locally
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    line: "127.0.1.1 {{ ansible_facts.hostname }} {{ ansible_facts.hostname }}.localdomain"
+    state: present
+  when: common_ensure_hostname_resolves | default(true) | bool
+
+- name: Build effective common packages list
+  ansible.builtin.set_fact:
+    common_packages_effective: >-
+      {{
+        (common_packages | default([]))
+        | difference(['fail2ban'])
+        if not (common_fail2ban_enable | default(false) | bool)
+        else (common_packages | default([]))
+      }}
+
+- name: Ensure common packages are present
+  ansible.builtin.apt:
+    name: "{{ common_packages_effective | default(common_packages) }}"
+    state: present
+    update_cache: true
+    lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
+
+- name: Create admin user
+  ansible.builtin.user:
+    name: "{{ admin_user }}"
+    shell: /bin/bash
+    groups: sudo
+    append: true
+    create_home: true
+
+- name: Ensure admin user password is provided when enabled
+  ansible.builtin.assert:
+    that:
+      - (admin_user_password_plain | default('') | string | trim) | length > 0
+    fail_msg: >-
+      admin_user_manage_password is enabled but admin_user_password_plain is empty.
+      Set ansible_become_password in ansible-vault.
+  when: admin_user_manage_password | default(false) | bool
+  no_log: true
+
+- name: Set admin user password (deterministic hash)
+  ansible.builtin.user:
+    name: "{{ admin_user }}"
+    password: "{{ (admin_user_password_plain | string) | password_hash('sha512', (inventory_hostname | hash('sha1'))[:16]) }}"
+    update_password: always
+  when: admin_user_manage_password | default(false) | bool
+  no_log: true
+
+- name: Allow admin user passwordless sudo
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ admin_user }}"
+    content: "{{ admin_user }} ALL=(ALL:ALL) NOPASSWD:ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+
+- name: Authorize SSH keys
+  ansible.builtin.authorized_key:
+    user: "{{ admin_user }}"
+    state: present
+    key: "{{ item }}"
+  loop: "{{ admin_ssh_authorized_keys }}"
+
+- name: Ensure chrony enabled
+  ansible.builtin.service:
+    name: chrony
+    state: started
+    enabled: true
+
+- name: Ensure fail2ban enabled
+  ansible.builtin.service:
+    name: fail2ban
+    state: started
+    enabled: true
+  when: common_fail2ban_enable | default(false) | bool
+
+- name: Ensure fail2ban disabled during bootstrap
+  ansible.builtin.service:
+    name: fail2ban
+    state: stopped
+    enabled: false
+  when: not (common_fail2ban_enable | default(false) | bool)
+  failed_when: false

@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+import os
+import re
+import subprocess
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+LISTEN_HOST = os.environ.get("FREERADIUS_STATUS_EXPORTER_LISTEN_HOST", "127.0.0.1")
+LISTEN_PORT = int(os.environ.get("FREERADIUS_STATUS_EXPORTER_LISTEN_PORT", "9812"))
+METRICS_PATH = (os.environ.get("FREERADIUS_STATUS_EXPORTER_METRICS_PATH", "/metrics") or "/metrics").strip()
+
+STATUS_HOST = os.environ.get("FREERADIUS_STATUS_EXPORTER_STATUS_HOST", "127.0.0.1")
+STATUS_PORT = int(os.environ.get("FREERADIUS_STATUS_EXPORTER_STATUS_PORT", "18121"))
+STATUS_SECRET = os.environ.get("FREERADIUS_STATUS_EXPORTER_STATUS_SECRET", "adminsecret")
+RADCLIENT_BIN = os.environ.get("FREERADIUS_STATUS_EXPORTER_RADCLIENT", "/usr/bin/radclient")
+
+QUERY_TIMEOUT_SECONDS = float(os.environ.get("FREERADIUS_STATUS_EXPORTER_TIMEOUT", "2.5"))
+
+
+_attr_line_re = re.compile(r"^[ \t]*([A-Za-z0-9-]+)[ \t]*=[ \t]*(.+?)[ \t]*$")
+
+
+def _escape_label_value(value: str) -> str:
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("\n", " ")
+        .replace('"', '\\"')
+    )
+
+
+def _metric_name_from_attr(attr: str) -> str:
+    name = (attr or "").strip().lower()
+    name = re.sub(r"[^a-z0-9]+", "_", name).strip("_")
+    return "tuxedovpn_freeradius_status_" + (name or "unknown")
+
+
+def _run_status_query(stat_type: str):
+    # Use numeric values so we don't depend on parsing values from the dictionary.
+    # See /usr/share/freeradius/dictionary.freeradius
+    stat_map = {
+        "All": 31,       # 0x1f
+        "Internal": 16,  # 0x10
+    }
+    request = "FreeRADIUS-Statistics-Type = %d\n" % int(stat_map.get(stat_type, 31))
+    cmd = [RADCLIENT_BIN, "-x", f"{STATUS_HOST}:{STATUS_PORT}", "status", STATUS_SECRET]
+    result = subprocess.run(
+        cmd,
+        input=request.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=QUERY_TIMEOUT_SECONDS,
+        check=False,
+    )
+    out = (result.stdout or b"").decode("utf-8", errors="ignore").splitlines()
+    attrs = {}
+    for line in out:
+        m = _attr_line_re.match(line)
+        if not m:
+            continue
+        key = m.group(1).strip()
+        val_raw = m.group(2).strip()
+        try:
+            val = int(val_raw, 0)
+        except ValueError:
+            continue
+        attrs[key] = val
+    return attrs, result.returncode, "\n".join(out[-30:])
+
+
+def collect_metrics():
+    start = time.monotonic()
+    now = int(time.time())
+    lines = []
+
+    lines.append("# HELP tuxedovpn_freeradius_status_exporter_scrape_timestamp Exporter scrape UNIX timestamp")
+    lines.append("# TYPE tuxedovpn_freeradius_status_exporter_scrape_timestamp gauge")
+    lines.append(f"tuxedovpn_freeradius_status_exporter_scrape_timestamp {now}")
+
+    try:
+        attrs_all, rc_all, tail_all = _run_status_query("All")
+    except Exception as exc:
+        lines.append("# HELP tuxedovpn_freeradius_status_exporter_scrape_success 1 if scrape succeeds")
+        lines.append("# TYPE tuxedovpn_freeradius_status_exporter_scrape_success gauge")
+        lines.append("tuxedovpn_freeradius_status_exporter_scrape_success 0")
+        lines.append(f"# ERROR {exc}")
+        duration = time.monotonic() - start
+        lines.append("# HELP tuxedovpn_freeradius_status_exporter_scrape_duration_seconds Exporter scrape duration")
+        lines.append("# TYPE tuxedovpn_freeradius_status_exporter_scrape_duration_seconds gauge")
+        lines.append(f"tuxedovpn_freeradius_status_exporter_scrape_duration_seconds {duration:.6f}")
+        return "\n".join(lines) + "\n", 503
+
+    ok = (rc_all == 0) and (len(attrs_all) > 0)
+    lines.append("# HELP tuxedovpn_freeradius_status_exporter_scrape_success 1 if scrape succeeds")
+    lines.append("# TYPE tuxedovpn_freeradius_status_exporter_scrape_success gauge")
+    lines.append("tuxedovpn_freeradius_status_exporter_scrape_success %d" % (1 if ok else 0))
+
+    if not ok:
+        lines.append("# ERROR status query failed (rc_all=%s)" % (rc_all,))
+        if tail_all:
+            lines.append("# ERROR radclient(all) tail: " + _escape_label_value(tail_all))
+
+    # Export numeric attributes as Prometheus gauges (totals since process start).
+    # Keep names stable by deriving them from attribute names.
+    for attr, val in sorted(attrs_all.items()):
+        metric = _metric_name_from_attr(attr)
+        lines.append(f"# TYPE {metric} gauge")
+        lines.append(f"{metric} {int(val)}")
+
+    duration = time.monotonic() - start
+    lines.append("# HELP tuxedovpn_freeradius_status_exporter_scrape_duration_seconds Exporter scrape duration")
+    lines.append("# TYPE tuxedovpn_freeradius_status_exporter_scrape_duration_seconds gauge")
+    lines.append(f"tuxedovpn_freeradius_status_exporter_scrape_duration_seconds {duration:.6f}")
+
+    return "\n".join(lines) + "\n", 200 if ok else 503
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.rstrip("/") != METRICS_PATH.rstrip("/"):
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found\n")
+            return
+        body, status = collect_metrics()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body.encode("utf-8"))
+
+    def log_message(self, fmt, *args):
+        return
+
+
+def main():
+    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

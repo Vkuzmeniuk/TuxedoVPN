@@ -1,0 +1,42 @@
+---
+# Enable/disable deploying the tuxedo CLI on mgmt hosts.
+tuxedo_cli_enable: true
+
+# Where to place the Python package sources on the target host.
+tuxedo_cli_install_dir: "/opt/tuxedo"
+
+# Path to the CLI wrapper on the target host.
+tuxedo_cli_wrapper_path: "/usr/local/bin/tuxedo"
+
+# Unix user to run tuxedo as (also owns the pgpass file).
+tuxedo_cli_run_user: "{{ admin_user | default('support') }}"
+tuxedo_cli_run_group: "{{ tuxedo_cli_run_user }}"
+
+# Directory for config and secrets.
+tuxedo_cli_config_dir: "/etc/tuxedovpn"
+tuxedo_cli_config_path: "/etc/tuxedovpn/tuxedo.ini"
+tuxedo_cli_pgpass_path: "/etc/tuxedovpn/tuxedo.pgpass"
+
+# PostgreSQL connection settings used by tuxedo.
+# By default reuses the FreeRADIUS DB user because pg_hba is already configured for it.
+tuxedo_cli_pg_host: "127.0.0.1"
+tuxedo_cli_pg_port: "{{ freeradius_db_port | default(5432) }}"
+tuxedo_cli_pg_db: "{{ freeradius_db_name | default('radius') }}"
+tuxedo_cli_pg_user: "{{ freeradius_db_user | default('radius') }}"
+tuxedo_cli_pg_password: "{{ freeradius_db_password | default('') }}"
+tuxedo_cli_pg_sslmode: "prefer"
+tuxedo_cli_pg_connect_timeout_seconds: 2
+tuxedo_cli_pg_statement_timeout_seconds: 5
+
+# Schema/table names (override if your DB schema differs).
+tuxedo_cli_radcheck_table: "radcheck"
+tuxedo_cli_radusergroup_table: "radusergroup"
+tuxedo_cli_blocklist_table: "vpn_user_blocklist"
+tuxedo_cli_groups_table: "vpn_groups"
+
+# Default group used as a fallback when a user would otherwise end up without groups.
+tuxedo_cli_default_group_name: "{{ freeradius_default_group_name | default('default') }}"
+tuxedo_cli_default_group_priority: 0
+
+# Ensure helper tables exist on mgmt.
+tuxedo_cli_manage_schema: true

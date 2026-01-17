@@ -1,0 +1,6 @@
+# Local rules to guarantee at least one "strong" BitTorrent match.
+#
+# Rules are intentionally simple and biased towards a low false-positive rate.
+
+drop tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"TUXEDOVPN P2P BitTorrent handshake"; flow:established,to_server; content:"BitTorrent protocol"; depth:19; classtype:policy-violation; sid:9900001; rev:1;)
+drop udp $HOME_NET any -> $EXTERNAL_NET any (msg:"TUXEDOVPN P2P BitTorrent DHT (KRPC)"; content:"d1:ad2:id20:"; fast_pattern; classtype:policy-violation; sid:9900002; rev:1;)

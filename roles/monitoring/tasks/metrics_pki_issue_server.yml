@@ -1,0 +1,234 @@
+---
+# Issue a per-host TLS certificate for metrics (server cert) signed by the metrics CA.
+#
+# Input variables:
+# - metrics_server_host: inventory hostname to issue a certificate for
+# - metrics_pki_ca_host: host that stores the CA key/cert (mgmt)
+# - metrics_ca_cert_pem: CA certificate PEM (string)
+
+- name: Ensure metrics TLS directory exists on {{ metrics_server_host }}
+  ansible.builtin.file:
+    path: /etc/tuxedovpn/pki/metrics
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  delegate_to: "{{ metrics_server_host }}"
+
+- name: Install metrics CA certificate on {{ metrics_server_host }} (nginx mTLS verification)
+  ansible.builtin.copy:
+    dest: /etc/tuxedovpn/pki/metrics/ca.crt
+    content: "{{ metrics_ca_cert_pem }}"
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+  delegate_to: "{{ metrics_server_host }}"
+
+- name: Ensure metrics CA certificate permissions on {{ metrics_server_host }}
+  ansible.builtin.file:
+    path: /etc/tuxedovpn/pki/metrics/ca.crt
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ metrics_server_host }}"
+
+- name: Check if metrics server certificate already exists on {{ metrics_server_host }}
+  ansible.builtin.stat:
+    path: /etc/tuxedovpn/pki/metrics/server.crt
+  register: _metrics_server_cert_stat
+  changed_when: false
+  delegate_to: "{{ metrics_server_host }}"
+
+- name: Check if metrics server private key already exists on {{ metrics_server_host }}
+  ansible.builtin.stat:
+    path: /etc/tuxedovpn/pki/metrics/server.key
+  register: _metrics_server_key_stat
+  changed_when: false
+  delegate_to: "{{ metrics_server_host }}"
+
+- name: Fail when metrics server certificate exists without private key on {{ metrics_server_host }}
+  ansible.builtin.assert:
+    that:
+      - not (_metrics_server_cert_stat.stat.exists | default(false)) or (_metrics_server_key_stat.stat.exists | default(false))
+    fail_msg: >-
+      Metrics server certificate exists at /etc/tuxedovpn/pki/metrics/server.crt but the private key is missing at
+      /etc/tuxedovpn/pki/metrics/server.key on {{ metrics_server_host }}. Restore the key, or remove the certificate
+      to let Ansible re-issue a new one.
+  delegate_to: "{{ metrics_server_host }}"
+
+- name: Generate metrics server private key on {{ metrics_server_host }} (first run)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    umask 077
+    openssl genrsa -out /etc/tuxedovpn/pki/metrics/server.key 4096
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ metrics_server_host }}"
+  when:
+    - not (_metrics_server_cert_stat.stat.exists | default(false))
+    - not (_metrics_server_key_stat.stat.exists | default(false))
+  no_log: true
+
+- name: Build SAN lists for metrics server certificate on {{ metrics_server_host }}
+  ansible.builtin.set_fact:
+    _metrics_server_san_ips: >-
+      {{
+        (
+          [
+            hostvars[metrics_server_host].mgmt_wireguard_wireguard_ip | default(''),
+            hostvars[metrics_server_host].ansible_default_ipv4.address | default(''),
+            hostvars[metrics_server_host].ansible_host | default('')
+          ]
+          | select('match', '^\\d+\\.\\d+\\.\\d+\\.\\d+$')
+          | list
+          | unique
+        )
+      }}
+    _metrics_server_san_dns: >-
+      {{
+        (
+          [ metrics_server_host ]
+          + (
+              [ (prometheus_metrics_tls_server_name | default('') | trim) ]
+              if (prometheus_metrics_tls_server_name | default('') | trim | length) > 0
+              else []
+            )
+        ) | unique
+      }}
+  when: not (_metrics_server_cert_stat.stat.exists | default(false))
+
+- name: Ensure at least one SAN (DNS or IP) is available for {{ metrics_server_host }}
+  ansible.builtin.assert:
+    that:
+      - ((_metrics_server_san_dns | default([])) | length) > 0 or ((_metrics_server_san_ips | default([])) | length) > 0
+    fail_msg: >-
+      Unable to build any SANs for metrics TLS certificate on {{ metrics_server_host }}.
+      Set prometheus_metrics_tls_server_name (recommended) and/or ensure ansible_host is set.
+  when: not (_metrics_server_cert_stat.stat.exists | default(false))
+
+- name: Render OpenSSL CSR config for metrics server cert on {{ metrics_server_host }}
+  ansible.builtin.copy:
+    dest: /etc/tuxedovpn/pki/metrics/server.cnf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [req]
+      distinguished_name = dn
+      req_extensions = req_ext
+      prompt = no
+
+      [dn]
+      CN = {{ metrics_server_host }}
+
+      [req_ext]
+      subjectAltName = @alt_names
+
+      [alt_names]
+      {% for ip in (_metrics_server_san_ips | default([])) %}
+      IP.{{ loop.index }} = {{ ip }}
+      {% endfor %}
+      {% for dns in (_metrics_server_san_dns | default([])) %}
+      DNS.{{ loop.index }} = {{ dns }}
+      {% endfor %}
+  delegate_to: "{{ metrics_server_host }}"
+  when: not (_metrics_server_cert_stat.stat.exists | default(false))
+
+- name: Generate metrics server CSR on {{ metrics_server_host }}
+  ansible.builtin.command: >
+    openssl req -new
+    -key /etc/tuxedovpn/pki/metrics/server.key
+    -out /etc/tuxedovpn/pki/metrics/server.csr
+    -config /etc/tuxedovpn/pki/metrics/server.cnf
+  delegate_to: "{{ metrics_server_host }}"
+  when: not (_metrics_server_cert_stat.stat.exists | default(false))
+
+- name: Read CSR from {{ metrics_server_host }}
+  ansible.builtin.slurp:
+    path: /etc/tuxedovpn/pki/metrics/server.csr
+  register: _metrics_server_csr_slurp
+  delegate_to: "{{ metrics_server_host }}"
+  when: not (_metrics_server_cert_stat.stat.exists | default(false))
+  changed_when: false
+
+- name: Stage CSR for {{ metrics_server_host }} on CA host
+  ansible.builtin.copy:
+    dest: "/tmp/tuxedovpn-metrics-{{ metrics_server_host | regex_replace('[^A-Za-z0-9_.-]', '_') }}.csr"
+    content: "{{ _metrics_server_csr_slurp.content | b64decode }}"
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ metrics_pki_ca_host }}"
+  when: not (_metrics_server_cert_stat.stat.exists | default(false))
+
+- name: Render extfile for {{ metrics_server_host }} on CA host
+  ansible.builtin.copy:
+    dest: "/tmp/tuxedovpn-metrics-{{ metrics_server_host | regex_replace('[^A-Za-z0-9_.-]', '_') }}.cnf"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [req]
+      distinguished_name = dn
+      req_extensions = req_ext
+      prompt = no
+
+      [dn]
+      CN = {{ metrics_server_host }}
+
+      [req_ext]
+      subjectAltName = @alt_names
+
+      [alt_names]
+      {% for ip in (_metrics_server_san_ips | default([])) %}
+      IP.{{ loop.index }} = {{ ip }}
+      {% endfor %}
+      {% for dns in (_metrics_server_san_dns | default([])) %}
+      DNS.{{ loop.index }} = {{ dns }}
+      {% endfor %}
+  delegate_to: "{{ metrics_pki_ca_host }}"
+  when: not (_metrics_server_cert_stat.stat.exists | default(false))
+
+- name: Sign metrics server certificate for {{ metrics_server_host }}
+  ansible.builtin.command: >
+    openssl x509 -req
+    -in /tmp/tuxedovpn-metrics-{{ metrics_server_host | regex_replace('[^A-Za-z0-9_.-]', '_') }}.csr
+    -CA /etc/tuxedovpn/pki/metrics-ca/ca.crt
+    -CAkey /etc/tuxedovpn/pki/metrics-ca/ca.key
+    -CAcreateserial
+    -CAserial /etc/tuxedovpn/pki/metrics-ca/ca.srl
+    -out /tmp/tuxedovpn-metrics-{{ metrics_server_host | regex_replace('[^A-Za-z0-9_.-]', '_') }}.crt
+    -days 825 -sha256
+    -extensions req_ext
+    -extfile /tmp/tuxedovpn-metrics-{{ metrics_server_host | regex_replace('[^A-Za-z0-9_.-]', '_') }}.cnf
+  delegate_to: "{{ metrics_pki_ca_host }}"
+  when: not (_metrics_server_cert_stat.stat.exists | default(false))
+  no_log: true
+
+- name: Read signed metrics server certificate for {{ metrics_server_host }}
+  ansible.builtin.slurp:
+    path: "/tmp/tuxedovpn-metrics-{{ metrics_server_host | regex_replace('[^A-Za-z0-9_.-]', '_') }}.crt"
+  register: _metrics_server_cert_slurp
+  delegate_to: "{{ metrics_pki_ca_host }}"
+  when: not (_metrics_server_cert_stat.stat.exists | default(false))
+  changed_when: false
+
+- name: Install metrics server certificate on {{ metrics_server_host }}
+  ansible.builtin.copy:
+    dest: /etc/tuxedovpn/pki/metrics/server.crt
+    content: "{{ _metrics_server_cert_slurp.content | b64decode }}"
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ metrics_server_host }}"
+  when: not (_metrics_server_cert_stat.stat.exists | default(false))
+
+- name: Ensure metrics server key permissions on {{ metrics_server_host }}
+  ansible.builtin.file:
+    path: /etc/tuxedovpn/pki/metrics/server.key
+    owner: root
+    group: root
+    mode: "0600"
+  delegate_to: "{{ metrics_server_host }}"
+  when: not (_metrics_server_cert_stat.stat.exists | default(false))
