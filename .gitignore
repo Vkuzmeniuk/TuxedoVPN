@@ -1,9 +1,9 @@
 # Secrets (never commit)
 vault.yml
-inventory/hosts.ini
 .vault_pass
 .vault-password
 .vault_password
+inventory/hosts.ini
 
 # Ansible
 *.retry
@@ -19,5 +19,3 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-inventory/hosts.ini
-backup.bundle
