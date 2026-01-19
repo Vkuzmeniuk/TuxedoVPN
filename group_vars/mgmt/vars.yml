@@ -2,6 +2,9 @@ prometheus_target_groups:
   - vpn
   - mgmt
 
+# Logging (Loki)
+loki_enable: true
+
 monitoring_allowed_cidrs:
   - "192.168.56.0/24"
   - "0.0.0.0/0"
@@ -132,6 +135,8 @@ ufw_extra_rules:
   - { port: 8443, proto: tcp, src: "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}", direction: in }
   - { port: 3000, proto: tcp, src: "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}", direction: in }  # Grafana
   - { port: 9090, proto: tcp, src: "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}", direction: in }  # Prometheus
+  # Loki receives log pushes from nodes over the mgmt WireGuard tunnel
+  - { port: 3100, proto: tcp, direction: in, interface: "{{ mgmt_wireguard_interface }}" }  # Loki
 
 # Allow DNS from mgmt VPN clients on any interface; DNS from remote VPN client subnets only via wg-mgmt
 # (the restriction is enforced by Pi-hole UFW rules).

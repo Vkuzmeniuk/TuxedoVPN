@@ -44,6 +44,11 @@ freeradius_sql_check_radios: false
 freeradius_sql_allow_vulnerable_sql_auth: true
 freeradius_nas_default_description: "Managed by Ansible"
 freeradius_nas_include_virtual_server: false
+# Cleanup legacy NAS entries for VPN nodes. When mgmt-wireguard is enabled, VPN
+# nodes should talk to FreeRADIUS only from their WireGuard IPs; public/LAN
+# ansible_host entries are removed from the SQL `nas` table to avoid confusion
+# and accidental exposure if firewall/listener settings drift.
+freeradius_nas_prune_legacy_vpn_public_ips: true
 freeradius_manage_vpn_user: true
 # Fail fast if the managed VPN user cannot authenticate in RADIUS.
 freeradius_validate_vpn_user: true

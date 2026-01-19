@@ -1,0 +1,6 @@
+---
+- name: Restart Promtail
+  ansible.builtin.service:
+    name: promtail
+    state: restarted
+

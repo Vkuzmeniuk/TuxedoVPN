@@ -13,6 +13,9 @@ admin_ssh_authorized_keys:
 
 common_fail2ban_enable: true
 
+# Logging (Loki)
+promtail_enable: true
+
 apt_lock_timeout: 600
 apt_wait_timeout: 10
 apt_wait_poll_interval: 5

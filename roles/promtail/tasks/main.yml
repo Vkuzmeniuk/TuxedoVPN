@@ -1,0 +1,139 @@
+---
+- name: Assert Debian/Ubuntu (Grafana APT repo)
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == "Debian"
+    fail_msg: "role promtail currently supports Debian/Ubuntu only (installs from https://apt.grafana.com)."
+
+- name: Add Grafana APT key
+  ansible.builtin.apt_key:
+    url: https://apt.grafana.com/gpg.key
+    state: present
+
+- name: Add Grafana APT repo
+  ansible.builtin.apt_repository:
+    repo: "deb https://apt.grafana.com stable main"
+    state: present
+
+- name: Install Promtail
+  ansible.builtin.apt:
+    name: promtail
+    state: present
+    update_cache: true
+    lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
+
+- name: Ensure promtail system group exists
+  ansible.builtin.group:
+    name: promtail
+    system: true
+
+- name: Ensure promtail system user exists
+  ansible.builtin.user:
+    name: promtail
+    group: promtail
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Gather group database (for optional log access)
+  ansible.builtin.getent:
+    database: group
+
+- name: Add promtail to optional groups for log access
+  ansible.builtin.user:
+    name: promtail
+    groups: "{{ item }}"
+    append: true
+  loop: >-
+    {{
+      [
+        'adm',
+        'systemd-journal'
+      ]
+      + (
+        [
+          'grafana',
+          'postgres',
+          'pihole',
+          'freerad',
+          'freeradius'
+        ]
+        if ('mgmt' in group_names)
+        else []
+      )
+      + (
+        [
+          'suricata'
+        ]
+        if ('vpn' in group_names)
+        else []
+      )
+    }}
+  when: (ansible_facts.getent_group[item] is defined)
+  notify: Restart Promtail
+
+- name: Ensure Promtail state directory exists
+  ansible.builtin.file:
+    path: "{{ promtail_positions_file | dirname }}"
+    state: directory
+    owner: promtail
+    group: promtail
+    mode: "0750"
+
+- name: Ensure ocserv log file exists and is readable (optional)
+  ansible.builtin.file:
+    path: "{{ promtail_ocserv_log_path }}"
+    state: touch
+    owner: root
+    group: adm
+    mode: "0640"
+  when: promtail_manage_ocserv_log_permissions | default(true) | bool
+
+- name: Render /etc/promtail/config.yml
+  ansible.builtin.template:
+    src: config.yml.j2
+    dest: /etc/promtail/config.yml
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Promtail
+
+- name: Ensure Promtail enabled and started
+  block:
+    - name: Start and enable Promtail
+      ansible.builtin.service:
+        name: promtail
+        state: started
+        enabled: true
+
+    - name: Check Promtail service state
+      ansible.builtin.command: systemctl is-active promtail
+      register: promtail_is_active
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with Promtail logs when service is not active
+      when: (promtail_is_active.stdout | default('') | trim) != 'active'
+      block:
+        - name: Read Promtail service status
+          ansible.builtin.command: systemctl --no-pager --full status promtail
+          register: promtail_status
+          changed_when: false
+          failed_when: false
+
+        - name: Read Promtail journal logs
+          ansible.builtin.command: journalctl --no-pager -u promtail -n 200
+          register: promtail_journal
+          changed_when: false
+          failed_when: false
+
+        - name: Fail with Promtail troubleshooting output
+          ansible.builtin.fail:
+            msg: |-
+              promtail is not active (state={{ promtail_is_active.stdout | default('') | trim }}).
+
+              systemctl status:
+              {{ promtail_status.stdout | default('') | trim }}
+
+              journalctl (last 200 lines):
+              {{ promtail_journal.stdout | default('') | trim }}

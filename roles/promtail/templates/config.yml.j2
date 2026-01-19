@@ -1,0 +1,112 @@
+server:
+  http_listen_address: "{{ promtail_http_listen_address }}"
+  http_listen_port: {{ promtail_http_listen_port | int }}
+  grpc_listen_port: 0
+
+positions:
+  filename: "{{ promtail_positions_file }}"
+
+clients:
+  - url: "{{ promtail_loki_push_url }}"
+
+scrape_configs:
+  - job_name: syslog
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: syslog
+          host: "{{ inventory_hostname }}"
+          __path__: /var/log/syslog
+
+  - job_name: auth
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: auth
+          host: "{{ inventory_hostname }}"
+          __path__: /var/log/auth.log
+
+  - job_name: ocserv
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: ocserv
+          host: "{{ inventory_hostname }}"
+          __path__: "{{ promtail_ocserv_log_path }}"
+
+  - job_name: tuxedovpn_journal
+    journal:
+      max_age: "{{ promtail_journal_max_age }}"
+      labels:
+        job: journal
+        host: "{{ inventory_hostname }}"
+    relabel_configs:
+      - source_labels: ['__journal__systemd_unit']
+        regex: '(tuxedovpn-(dpi-agent|suricata|dpi-blocker|radius-pihole-sync)|freeradius)\\.service'
+        action: keep
+      - source_labels: ['__journal__systemd_unit']
+        target_label: unit
+
+{% if 'vpn' in group_names %}
+  - job_name: suricata_fast
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: suricata
+          host: "{{ inventory_hostname }}"
+          stream: fast
+          __path__: /var/log/suricata/fast.log
+{% if promtail_suricata_eve_enable | default(false) | bool %}
+
+  - job_name: suricata_eve
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: suricata
+          host: "{{ inventory_hostname }}"
+          stream: eve
+          __path__: /var/log/suricata/eve.json
+{% endif %}
+{% endif %}
+
+{% if 'mgmt' in group_names %}
+  - job_name: pihole
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: pihole
+          host: "{{ inventory_hostname }}"
+          __path__: /var/log/pihole/*.log
+
+  - job_name: freeradius
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: freeradius
+          host: "{{ inventory_hostname }}"
+          __path__: /var/log/freeradius/*.log
+
+  - job_name: nginx
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: nginx
+          host: "{{ inventory_hostname }}"
+          __path__: /var/log/nginx/*.log
+
+  - job_name: grafana
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: grafana
+          host: "{{ inventory_hostname }}"
+          __path__: /var/log/grafana/grafana.log
+
+  - job_name: postgresql
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: postgresql
+          host: "{{ inventory_hostname }}"
+          __path__: /var/log/postgresql/postgresql-*.log
+{% endif %}

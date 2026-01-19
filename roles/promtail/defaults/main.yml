@@ -1,0 +1,23 @@
+---
+# Promtail defaults.
+
+promtail_http_listen_address: "127.0.0.1"
+promtail_http_listen_port: 9080
+
+promtail_positions_file: "/var/lib/promtail/positions.yaml"
+
+promtail_loki_push_url: "http://{{ mgmt_wireguard_mgmt_ip | default('127.0.0.1') }}:3100/loki/api/v1/push"
+
+# Journal scraping (systemd)
+promtail_journal_max_age: "12h"
+
+# Log file permissions helpers (Ubuntu logs are typically root:adm 0640)
+promtail_manage_ocserv_log_permissions: true
+promtail_ocserv_log_path: >-
+  {{
+    vpn_log_file
+    | default(private_vpn_log_file | default('/var/log/ocserv.log'))
+  }}
+
+# Suricata EVE is high-volume; keep disabled by default.
+promtail_suricata_eve_enable: false

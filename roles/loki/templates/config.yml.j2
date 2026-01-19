@@ -1,0 +1,46 @@
+auth_enabled: false
+
+server:
+  http_listen_address: "{{ loki_http_listen_address }}"
+  http_listen_port: {{ loki_http_listen_port | int }}
+  grpc_listen_address: "{{ loki_grpc_listen_address }}"
+  grpc_listen_port: {{ loki_grpc_listen_port | int }}
+  log_level: "{{ loki_log_level }}"
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: "{{ loki_path_prefix }}"
+  storage:
+    filesystem:
+      chunks_directory: "{{ loki_path_prefix }}/chunks"
+      rules_directory: "{{ loki_path_prefix }}/rules"
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+compactor:
+  working_directory: "{{ loki_path_prefix }}/compactor"
+  retention_enabled: {{ loki_retention_enabled | bool | ternary('true', 'false') }}
+  retention_delete_delay: "{{ loki_retention_delete_delay }}"
+  retention_delete_worker_count: {{ loki_retention_delete_worker_count | int }}
+{% if (loki_delete_request_store | default('') | trim) | length > 0 %}
+  delete_request_store: "{{ loki_delete_request_store }}"
+{% endif %}
+
+limits_config:
+  retention_period: "{{ loki_retention_period }}"
+
+analytics:
+  reporting_enabled: {{ loki_analytics_reporting_enabled | bool | ternary('true', 'false') }}
+

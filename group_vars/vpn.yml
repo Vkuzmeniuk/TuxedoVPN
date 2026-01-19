@@ -4,6 +4,7 @@ ufw_extra_rules:
   - { port: 1812, proto: udp, direction: out, dest: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
   - { port: 1813, proto: udp, direction: out, dest: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
   - { port: 53,   proto: udp, direction: out, dest: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
+  - { port: 3100, proto: tcp, direction: out, dest: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }  # Loki push
   # Allow metrics scraping only from the management server (over WireGuard)
   - { port: 9813, proto: tcp, direction: in, src: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
   - { port: 9100, proto: tcp, direction: in, src: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }

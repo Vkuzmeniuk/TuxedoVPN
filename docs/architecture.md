@@ -123,3 +123,4 @@ The exact allowlist is defined by `ufw_extra_rules` (and role-specific toggles),
   - `tcp/9816` DPI webhook (mgmt)
   - `tcp/9817` RADIUS→Pi-hole sync metrics (mgmt)
 - **Dashboards** (usually available only to mgmt VPN clients): `tcp/3000` Grafana, `tcp/9090` Prometheus
+- **Logs**: `tcp/3100` Loki (intended to be reachable only via `wg-mgmt`)

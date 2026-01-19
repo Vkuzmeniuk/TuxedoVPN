@@ -1,4 +1,5 @@
 {% set radius_ds_enabled = grafana_enable_freeradius_datasource | default(false) | bool %}
+{% set loki_ds_enabled = grafana_enable_loki_datasource | default(false) | bool %}
 apiVersion: 1
 datasources:
   - name: Prometheus
@@ -7,6 +8,13 @@ datasources:
     url: http://localhost:9090
     isDefault: true
     editable: true
+{% if loki_ds_enabled %}
+  - name: "{{ grafana_loki_datasource_name | default('Loki') }}"
+    type: loki
+    access: proxy
+    url: "{{ grafana_loki_datasource_url | default('http://localhost:3100') }}"
+    editable: true
+{% endif %}
 {% if radius_ds_enabled %}
   - name: "{{ grafana_freeradius_datasource_name | default('FreeRADIUS') }}"
     type: postgres

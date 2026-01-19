@@ -1,0 +1,25 @@
+---
+# Loki server (single binary) defaults.
+
+loki_http_listen_address: "0.0.0.0"
+loki_http_listen_port: 3100
+loki_grpc_listen_address: "127.0.0.1"
+loki_grpc_listen_port: 9096
+
+loki_log_level: "info"
+
+# Storage (single node)
+loki_path_prefix: "/var/lib/loki"
+
+# Retention (requires compactor.retention_enabled=true)
+loki_retention_enabled: true
+loki_retention_period: "168h" # 7d
+loki_retention_delete_delay: "2h"
+loki_retention_delete_worker_count: 150
+
+# Required when retention is enabled.
+# For single-node filesystem storage, keep "filesystem".
+loki_delete_request_store: "filesystem"
+
+# Disable anonymous analytics by default.
+loki_analytics_reporting_enabled: false

@@ -16,6 +16,7 @@
 - **Inter-server network**: WireGuard tunnel mgmt-vpn (`wg-mgmt`)
 - **DNS**: Pi-hole on the management server, used by VPN clients and VPN nodes
 - **Observability**: Prometheus + Grafana + exporters
+- **Centralized logging**: Loki + Promtail (optional)
 - **Optional security policy enforcement**: Suricata (NFQUEUE) + automatic temporary user blocks in RADIUS
 
 ## Topology (high level)
@@ -23,12 +24,14 @@
 - `mgmt` hosts:
   - FreeRADIUS + PostgreSQL (authentication/accounting DB)
   - Prometheus + Grafana (monitoring)
+  - Loki (log storage) + Promtail (log shipping)
   - Pi-hole (DNS for VPN clients/nodes)
   - DPI webhook service (writes temporary blocks into the RADIUS DB)
   - Admin VPN endpoint (ops/admin access)
 - `vpn` hosts:
   - User VPN endpoint(s) (ocserv)
   - Suricata (NFQUEUE) + DPI agent (disconnect + sending events to mgmt)
+  - Promtail (log shipping)
 
 Inter-server traffic (RADIUS, DNS, Prometheus scraping) is routed through **WireGuard `wg-mgmt`** by default.
 
@@ -128,9 +131,10 @@ ansible-playbook site.yml -l mgmt -t freeradius -J
 
 1. **All hosts**: `common` + node_exporter (`monitoring` in node mode)
 2. **mgmt+vpn**: `mgmt-wireguard` (creates `wg-mgmt` and routes)
-3. **mgmt**: Prometheus+Grafana, FreeRADIUS+PostgreSQL, DPI webhook, private VPN, Pi-hole, RADIUS-Pi-hole sync
+3. **mgmt**: Prometheus+Grafana, Loki (optional), FreeRADIUS+PostgreSQL, DPI webhook, private VPN, Pi-hole, RADIUS-Pi-hole sync
    - (optional) nginx reverse proxy for Grafana/Prometheus/Pi-hole
 4. **vpn**: public VPN, Suricata + DPI agent
+5. **All hosts**: Promtail (optional) ships logs to Loki
 
 ## Documentation
 
@@ -138,6 +142,7 @@ ansible-playbook site.yml -l mgmt -t freeradius -J
 - `docs/wireguard-mgmt.md` – mgmt-vpn WireGuard tunnel design
 - `docs/certificates.md` – Certbot/Let’s Encrypt notes
 - `docs/metrics.md` – metrics/Prometheus jobs overview
+- `docs/logging.md` – centralized logging with Loki + Promtail
 - `roles/mgmt-reverse-proxy/README.md` – HTTPS reverse proxy for mgmt services
 - `docs/role-map.md` – role execution map (handy for debugging)
 - `docs/security-hardening.md` – security hardening notes (firewall model, optional extras)

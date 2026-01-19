@@ -160,6 +160,10 @@ Notes:
 
 ## Troubleshooting
 
+## Centralized logging (Loki)
+
+See `docs/logging.md` for enabling Loki + Promtail and basic LogQL queries.
+
 ### WireGuard tunnel issues
 
 Commands: `docs/wireguard-mgmt.md`. Typical checks:

@@ -45,6 +45,7 @@
         tags: ["prometheus_server", "monitoring_server", "node_exporter"],
         vars: { mode: "server" },
       }
+    - { role: loki, tags: ["loki"], when: (loki_enable | default(false)) | bool }
     - { role: freeradius, tags: ["freeradius"] }
     - { role: dpi-mgmt, tags: ["dpi_mgmt"] }
     - { role: private-vpn, tags: ["private_vpn"] }
@@ -60,3 +61,9 @@
   roles:
     - { role: public-vpn, tags: ["public_vpn"] }
     - { role: dpi, tags: ["dpi"] }
+
+- hosts: all
+  remote_user: "{{ admin_user | default('support') }}"
+  become: true
+  roles:
+    - { role: promtail, tags: ["promtail"], when: (promtail_enable | default(false)) | bool }

@@ -737,6 +737,30 @@
     ) }}"
   loop: "{{ groups['vpn'] | default([]) }}"
 
+- name: Build legacy VPN public/LAN NAS name list for cleanup
+  ansible.builtin.set_fact:
+    _freeradius_legacy_vpn_public_nas_names: "{{ (_freeradius_legacy_vpn_public_nas_names | default([])) + [ (hostvars[item].ansible_host | default(item)) ] }}"
+  loop: "{{ groups['vpn'] | default([]) }}"
+  when:
+    - freeradius_nas_prune_legacy_vpn_public_ips | default(true) | bool
+    - (hostvars[item].mgmt_wireguard_wireguard_ip | default('') | trim) | length > 0
+    - (hostvars[item].ansible_host | default(item)) != (hostvars[item].mgmt_wireguard_wireguard_ip | trim)
+    - (hostvars[item].ansible_host | default(item)) != freeradius_localhost_client_addr
+  changed_when: false
+
+- name: Normalize legacy VPN NAS cleanup list
+  ansible.builtin.set_fact:
+    _freeradius_legacy_vpn_public_nas_names: >-
+      {{
+        (_freeradius_legacy_vpn_public_nas_names | default([]))
+        | map('trim')
+        | select('match', '^\\S+$')
+        | list
+        | unique
+      }}
+  when: freeradius_nas_prune_legacy_vpn_public_ips | default(true) | bool
+  changed_when: false
+
 - name: Compose final RADIUS clients definition
   ansible.builtin.set_fact:
     freeradius_clients: "{{ freeradius_extra_clients }}"
@@ -834,6 +858,24 @@
   become_user: postgres
   when: (freeradius_nas_clients_render | default([])) | length > 0
   changed_when: false
+
+- name: Remove legacy VPN public/LAN NAS rows (cleanup)
+  ansible.builtin.command:
+    cmd: >-
+      psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 -c
+      "DELETE FROM nas
+        WHERE nasname IN (
+          {%- for ip in (_freeradius_legacy_vpn_public_nas_names | default([])) -%}
+          '{{ ip | replace("'", "''") }}'{% if not loop.last %},{% endif %}
+          {%- endfor -%}
+        );"
+  become_user: postgres
+  when:
+    - freeradius_nas_prune_legacy_vpn_public_ips | default(true) | bool
+    - (_freeradius_legacy_vpn_public_nas_names | default([])) | length > 0
+    - (freeradius_nas_clients_render | default([])) | length > 0
+  register: freeradius_nas_legacy_cleanup
+  changed_when: "'DELETE 0' not in (freeradius_nas_legacy_cleanup.stdout | default(''))"
 
 - name: Remove duplicate NAS rows
   ansible.builtin.command:
