@@ -5,6 +5,10 @@
 # To enable Certbot/Let’s Encrypt, set `tuxedovpn_tls_mode: "certbot"`.
 tuxedovpn_tls_mode: "selfsigned" # selfsigned | certbot
 
+# ACME validation method for this host (recommended: DNS-01 to keep UFW unchanged)
+tuxedovpn_acme_challenge: "dns" # dns | http
+tuxedovpn_acme_dns_provider: "cloudflare"
+
 # Public hostname used in client UX and (optionally) for certificates.
 vpn_domain: "vpn.example.com"
 

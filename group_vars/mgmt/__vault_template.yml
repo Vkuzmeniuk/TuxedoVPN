@@ -4,6 +4,10 @@ pihole_admin_password: "change_me_pihole_admin_password"
 
 # Certbot / Let’s Encrypt (optional, if you issue certificates from the mgmt or reverse-proxy host)
 vault_certbot_email: "admin@example.com"
+
+# Cloudflare DNS-01 (optional convenience):
+# If set, the role can auto-generate /etc/letsencrypt/dns-credentials.ini for you.
+vault_certbot_cloudflare_api_token: ""
 vault_certbot_dns_credentials_ini: |
   # Example (Cloudflare):
   # dns_cloudflare_api_token = "change_me"

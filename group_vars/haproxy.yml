@@ -1,3 +1,0 @@
-ssh_port: 22
-ufw_extra_rules:
-  - { port: 443 }

@@ -5,6 +5,10 @@
 # To enable Certbot/Let’s Encrypt, set `tuxedovpn_tls_mode: "certbot"`.
 tuxedovpn_tls_mode: "selfsigned" # selfsigned | certbot
 
+# ACME validation method for this host (recommended: DNS-01 to keep UFW unchanged)
+tuxedovpn_acme_challenge: "dns" # dns | http
+tuxedovpn_acme_dns_provider: "cloudflare"
+
 # Hostname used for the mgmt/private VPN endpoint (ocserv).
 vpn_domain: "mgmt.example.com"
 vpn_network_address: "10.66.100.0"
@@ -17,7 +21,7 @@ prometheus_domain: "prometheus.mgmt.example.com"
 pihole_domain: "pihole.mgmt.example.com"
 
 # Enable internal reverse proxy for mgmt services on the mgmt VPN gateway IP.
-mgmt_reverse_proxy_enable: false
+mgmt_reverse_proxy_enable: true
 # Keep mgmt services TLS self-signed by default (internal-only). Ocserv TLS can still use Certbot.
 mgmt_reverse_proxy_tls_mode: "selfsigned" # selfsigned | certbot
 

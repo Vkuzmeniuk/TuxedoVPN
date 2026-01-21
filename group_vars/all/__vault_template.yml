@@ -10,6 +10,10 @@ vault_dpi_webhook_token: ""
 # Certbot / Let’s Encrypt (recommended for real certificates)
 # Used by the `roles/certbot` role (invoked directly or by other roles when cert files are missing).
 vault_certbot_email: "admin@example.com"
+
+# Cloudflare DNS-01 (optional convenience):
+# If set, the role can auto-generate /etc/letsencrypt/dns-credentials.ini for you.
+vault_certbot_cloudflare_api_token: ""
 vault_certbot_dns_credentials_ini: |
   # Example (Cloudflare):
   # dns_cloudflare_api_token = "change_me"
