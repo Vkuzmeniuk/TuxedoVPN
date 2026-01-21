@@ -9,6 +9,7 @@ set -euo pipefail
 STATE_FILE="/run/tuxedovpn-certbot-standalone-stopped-services"
 : > "${STATE_FILE}"
 
+{% if _certbot_http01_manage_firewall | default(false) %}
 # Temporarily allow inbound HTTP-01 validation traffic (tcp/80) through UFW/iptables.
 RULE_COMMENT="tuxedovpn-certbot-http01"
 CHAIN="ufw-user-input"
@@ -23,6 +24,7 @@ if command -v iptables >/dev/null 2>&1; then
     echo "iptables:${CHAIN}" >> "${STATE_FILE}"
   fi
 fi
+{% endif %}
 
 {% set services = (_certbot_standalone_stop_services | default([])) %}
 {% if services | length == 0 %}

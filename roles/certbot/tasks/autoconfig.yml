@@ -1,0 +1,50 @@
+---
+- name: Normalize ACME DNS provider
+  ansible.builtin.set_fact:
+    _certbot_dns_provider_effective: >-
+      {{
+        (tuxedovpn_acme_dns_provider | default('') | string | lower)
+        if (tuxedovpn_acme_dns_provider | default('') | string | trim | length) > 0
+        else (
+          'cloudflare'
+          if (vault_certbot_cloudflare_api_token | default('') | string | trim | length) > 0
+          else ''
+        )
+      }}
+  changed_when: false
+
+- name: Autoconfigure DNS-01 (Cloudflare) when auth args are missing
+  block:
+    - name: Ensure Cloudflare certbot plugin package is installed
+      ansible.builtin.set_fact:
+        certbot_dns_plugin_packages: >-
+          {{
+            (certbot_dns_plugin_packages | default([]))
+            if ((certbot_dns_plugin_packages | default([])) | length) > 0
+            else ['python3-certbot-dns-cloudflare']
+          }}
+      changed_when: false
+
+    - name: Ensure Cloudflare credentials content is set (from vault token)
+      ansible.builtin.set_fact:
+        certbot_dns_credentials_content: |-
+          dns_cloudflare_api_token = {{ vault_certbot_cloudflare_api_token | trim }}
+      when:
+        - (certbot_dns_credentials_content | default('') | trim | length) == 0
+        - (vault_certbot_cloudflare_api_token | default('') | string | trim | length) > 0
+      no_log: true
+      changed_when: false
+
+    - name: Ensure Cloudflare auth args are set
+      ansible.builtin.set_fact:
+        certbot_auth_args:
+          - "--dns-cloudflare"
+          - "--dns-cloudflare-credentials"
+          - "{{ certbot_dns_credentials_path }}"
+          - "--dns-cloudflare-propagation-seconds"
+          - "{{ (certbot_dns_cloudflare_propagation_seconds | default(60) | int) | string }}"
+      changed_when: false
+  when:
+    - (certbot_method | default('') | string) == "dns"
+    - (certbot_auth_args | default([]) | length) == 0
+    - _certbot_dns_provider_effective == "cloudflare"

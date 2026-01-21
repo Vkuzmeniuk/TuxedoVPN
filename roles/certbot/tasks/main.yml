@@ -5,6 +5,9 @@
       - certbot_action in ["issue", "renew"]
     fail_msg: "certbot_action must be 'issue' or 'renew'."
 
+- name: Autoconfigure certbot parameters (optional)
+  ansible.builtin.include_tasks: autoconfig.yml
+
 - name: Install Certbot and prerequisites
   ansible.builtin.include_tasks: install.yml
 

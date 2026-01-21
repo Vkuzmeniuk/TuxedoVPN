@@ -29,7 +29,9 @@
         executable: /bin/bash
       register: _certbot_http01_chain
       changed_when: false
-      when: (certbot_method | default('')) == "standalone"
+      when:
+        - (certbot_method | default('')) == "standalone"
+        - certbot_http01_manage_firewall | default(false) | bool
 
     - name: Check temporary HTTP-01 allow rule (tcp/80)
       ansible.builtin.command: >-
@@ -40,7 +42,9 @@
       register: _certbot_http01_rule_check
       changed_when: false
       failed_when: false
-      when: (certbot_method | default('')) == "standalone"
+      when:
+        - (certbot_method | default('')) == "standalone"
+        - certbot_http01_manage_firewall | default(false) | bool
 
     - name: Insert temporary HTTP-01 allow rule (tcp/80)
       ansible.builtin.command: >-
@@ -52,6 +56,8 @@
       changed_when: true
       when:
         - (certbot_method | default('')) == "standalone"
+        - certbot_http01_manage_firewall | default(false) | bool
+        - _certbot_http01_rule_check is defined
         - (_certbot_http01_rule_check.rc | default(1) | int) != 0
 
     - name: Stop services for standalone renew (to free the port)
@@ -110,4 +116,6 @@
       failed_when: false
       when:
         - (certbot_method | default('')) == "standalone"
+        - certbot_http01_manage_firewall | default(false) | bool
+        - _certbot_http01_rule_check is defined
         - (_certbot_http01_rule_check.rc | default(0) | int) != 0

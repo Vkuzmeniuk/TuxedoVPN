@@ -21,6 +21,11 @@ certbot_cert_name: ""
 # - standalone: certbot runs its own temporary HTTP-01 listener on :80 (no TLS-ALPN support in the standalone plugin)
 certbot_method: "dns" # dns | webroot | standalone
 
+# When using standalone (HTTP-01), the role can optionally insert a temporary iptables rule
+# to allow inbound tcp/80 for ACME validation without editing UFW config.
+# Default is safe: do not touch firewall (prefer DNS-01 instead).
+certbot_http01_manage_firewall: false
+
 # When using standalone mode, stop these services before issuing (to free the port)
 # and start them again afterwards.
 certbot_standalone_stop_services: [] # e.g. ["ocserv", "nginx"]
@@ -47,6 +52,7 @@ certbot_webroot_nginx_conf_path: "/etc/nginx/conf.d/letsencrypt-webroot.conf"
 # DNS credentials file (needed only if the plugin requires it).
 certbot_dns_credentials_path: "/etc/letsencrypt/dns-credentials.ini"
 certbot_dns_credentials_content: "{{ vault_certbot_dns_credentials_ini | default('') }}"
+certbot_dns_cloudflare_propagation_seconds: 60
 
 # Packages
 certbot_package: "certbot"

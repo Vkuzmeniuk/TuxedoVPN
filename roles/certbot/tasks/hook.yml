@@ -43,6 +43,7 @@
     mode: "0755"
   vars:
     _certbot_standalone_stop_services: "{{ certbot_standalone_stop_services | default([]) }}"
+    _certbot_http01_manage_firewall: "{{ certbot_http01_manage_firewall | default(false) | bool }}"
   when:
     - (certbot_method | default('')) == "standalone"
     - certbot_standalone_install_renew_hooks | default(true) | bool
@@ -55,6 +56,8 @@
     owner: root
     group: root
     mode: "0755"
+  vars:
+    _certbot_http01_manage_firewall: "{{ certbot_http01_manage_firewall | default(false) | bool }}"
   when:
     - (certbot_method | default('')) == "standalone"
     - certbot_standalone_install_renew_hooks | default(true) | bool

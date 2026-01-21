@@ -23,8 +23,10 @@ while IFS= read -r line; do
   systemctl start "${line}" >/dev/null 2>&1 || true
 done < "${STATE_FILE}"
 
+{% if _certbot_http01_manage_firewall | default(false) %}
 if [[ -n "${CHAIN}" ]] && command -v iptables >/dev/null 2>&1; then
   iptables -D "${CHAIN}" -p tcp --dport 80 -m comment --comment "${RULE_COMMENT}" -j ACCEPT >/dev/null 2>&1 || true
 fi
+{% endif %}
 
 rm -f "${STATE_FILE}"
