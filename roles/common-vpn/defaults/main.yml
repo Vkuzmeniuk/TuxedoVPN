@@ -5,6 +5,33 @@ vpn_cert_fullchain: "{{ private_vpn_cert_fullchain | default('/etc/letsencrypt/l
 vpn_cert_key: "{{ private_vpn_cert_key | default('/etc/letsencrypt/live/' ~ vpn_domain ~ '/privkey.pem') }}"
 vpn_cert_selfsigned_dir: "{{ private_vpn_selfsigned_dir | default('/etc/ocserv/certs') }}"
 
+# Certbot integration (optional): auto-issue the ocserv certificate when missing.
+vpn_cert_auto_issue_enable: true
+
+# ACME challenge method for Certbot auto-issue.
+# Shared defaults can be set via:
+# - tuxedovpn_acme_challenge (dns | http)  (preferred)
+# - tuxedovpn_certbot_method (dns | webroot | standalone) (legacy)
+# - tuxedovpn_certbot_auth_args / tuxedovpn_certbot_extra_args (legacy)
+vpn_certbot_method: >-
+  {{
+    (
+      'dns'
+      if (tuxedovpn_acme_challenge | default('') | string | lower) == 'dns'
+      else (
+        'standalone'
+        if (tuxedovpn_acme_challenge | default('') | string | lower) == 'http'
+        else (tuxedovpn_certbot_method | default('standalone'))
+      )
+    )
+  }} # dns | webroot | standalone
+vpn_certbot_auth_args: "{{ tuxedovpn_certbot_auth_args | default([]) }}"
+vpn_certbot_extra_args: "{{ tuxedovpn_certbot_extra_args | default([]) }}"
+vpn_certbot_standalone_stop_services:
+  - nginx
+  - apache2
+  - pihole-FTL
+
 # ===== Authentication (RADIUS / local) =====
 vpn_auth_mode: "{{ private_vpn_auth | default('radius') }}"  # local | radius
 vpn_ocpasswd_file: "{{ private_vpn_ocpasswd_file | default('/etc/ocserv/ocpasswd') }}"

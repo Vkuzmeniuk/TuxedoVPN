@@ -51,9 +51,23 @@ mgmt_reverse_proxy_letsencrypt_privkey: "{{ mgmt_reverse_proxy_letsencrypt_dir }
 
 # Certbot integration (optional): auto-issue the reverse proxy certificate when missing.
 mgmt_reverse_proxy_cert_auto_issue_enable: true
-mgmt_reverse_proxy_certbot_method: "standalone" # dns | webroot | standalone
-mgmt_reverse_proxy_certbot_auth_args: []
-mgmt_reverse_proxy_certbot_extra_args: []
+# You can set a shared default via tuxedovpn_acme_challenge/tuxedovpn_acme_dns_provider (preferred),
+# or via legacy tuxedovpn_certbot_method/tuxedovpn_certbot_auth_args,
+# or override per role/host with mgmt_reverse_proxy_certbot_* vars.
+mgmt_reverse_proxy_certbot_method: >-
+  {{
+    (
+      'dns'
+      if (tuxedovpn_acme_challenge | default('') | string | lower) == 'dns'
+      else (
+        'standalone'
+        if (tuxedovpn_acme_challenge | default('') | string | lower) == 'http'
+        else (tuxedovpn_certbot_method | default('standalone'))
+      )
+    )
+  }} # dns | webroot | standalone
+mgmt_reverse_proxy_certbot_auth_args: "{{ tuxedovpn_certbot_auth_args | default([]) }}"
+mgmt_reverse_proxy_certbot_extra_args: "{{ tuxedovpn_certbot_extra_args | default([]) }}"
 mgmt_reverse_proxy_certbot_standalone_stop_services:
   - pihole-FTL
   - nginx

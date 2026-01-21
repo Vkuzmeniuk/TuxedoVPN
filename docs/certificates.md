@@ -11,6 +11,13 @@ TLS mode is configured per host via `tuxedovpn_tls_mode` (recommended location: 
 tuxedovpn_tls_mode: "selfsigned" # selfsigned | certbot
 ```
 
+ACME validation method can also be set per host (recommended):
+
+```yaml
+tuxedovpn_acme_challenge: "dns" # dns | http
+tuxedovpn_acme_dns_provider: "cloudflare"
+```
+
 You can also set this as a global default in `group_vars/all/vars.yml` and override it per host as needed.
 
 Both `group_vars/vpn.yml` and `group_vars/mgmt/vars.yml` derive `vpn_cert_use_existing` from this flag.
@@ -52,22 +59,20 @@ Use DNS-01 when:
 - VPN nodes are behind an L4 proxy (HAProxy tcp/SNI passthrough) and port 80 is not routed to the node.
 - You need wildcard certificates (`*.example.com`).
 
-You need to pass provider-specific auth parameters and (optionally) the contents of the credentials file via Ansible Vault.
+DNS-01 does not require opening inbound ports on the host, so UFW can stay locked down.
+For auto-issuance via `site.yml` the simplest config is:
+
+```yaml
+# group_vars/all/vars.yml or host_vars/<host>.yml
+tuxedovpn_acme_challenge: "dns"
+tuxedovpn_acme_dns_provider: "cloudflare"
+```
 
 Example (Cloudflare token):
 
 - Vault:
   - `vault_certbot_email`
-  - `vault_certbot_dns_credentials_ini` containing `dns_cloudflare_api_token = "..."`
-- Extra vars:
-  - `certbot_dns_plugin_packages: ["python3-certbot-dns-cloudflare"]`
-  - `certbot_method: "dns"`
-  - `certbot_auth_args`:
-    - `--dns-cloudflare`
-    - `--dns-cloudflare-credentials`
-    - `/etc/letsencrypt/dns-credentials.ini`
-    - `--dns-cloudflare-propagation-seconds`
-    - `60`
+  - `vault_certbot_cloudflare_api_token` (recommended), or `vault_certbot_dns_credentials_ini`
 
 ### HTTP-01 (standalone, easiest with plain A-records)
 
@@ -78,7 +83,8 @@ Use this when:
 - You don't have DNS API credentials.
 
 This uses Certbot in `standalone` mode (HTTP-01) on `:80`.
-The role temporarily opens `tcp/80` via an iptables rule and can stop services bound to `:80` (for example `pihole-FTL`) during issuance/renewal.
+For safety, the role does not modify firewall rules by default.
+If you choose HTTP-01, ensure `tcp/80` is reachable from the Internet (UFW allow), or explicitly enable temporary iptables rule insertion via `certbot_http01_manage_firewall: true`.
 
 ## Issuing certificates (via `site.yml`)
 
@@ -107,6 +113,31 @@ ansible-playbook site.yml -l mgmt -t private_vpn -J
 ```bash
 ansible-playbook site.yml -l mgmt -t mgmt_reverse_proxy -J
 ```
+
+### Selecting HTTP-01 vs DNS-01 for auto-issuance
+
+Roles that auto-issue certificates via `roles/certbot` (ocserv and mgmt reverse proxy) default to `standalone` (HTTP-01).
+To switch globally, set a single variable:
+
+```yaml
+tuxedovpn_acme_challenge: "dns" # dns | http
+```
+
+Optional (Cloudflare convenience autoconfig):
+
+```yaml
+tuxedovpn_acme_dns_provider: "cloudflare"
+```
+
+Or override per component/host (legacy/advanced):
+
+- `vpn_certbot_method` / `vpn_certbot_auth_args` / `vpn_certbot_extra_args`
+- `mgmt_reverse_proxy_certbot_method` / `mgmt_reverse_proxy_certbot_auth_args` / `mgmt_reverse_proxy_certbot_extra_args`
+
+## Auto-renew
+
+On systemd hosts the role enables `certbot.timer` so renewals are automatic.
+When a certificate is renewed, Certbot runs deploy hooks installed by Ansible (to restart `ocserv` / `nginx` as configured).
 
 ## On-disk paths
 
