@@ -5,14 +5,50 @@
       - ansible_facts.os_family == "Debian"
     fail_msg: "role loki currently supports Debian/Ubuntu only (installs from https://apt.grafana.com)."
 
-- name: Add Grafana APT key
-  ansible.builtin.apt_key:
-    url: https://apt.grafana.com/gpg.key
+- name: Install gnupg (for APT keyrings)
+  ansible.builtin.apt:
+    name: gnupg
     state: present
+    lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
+  when: ansible_pkg_mgr == "apt"
 
-- name: Add Grafana APT repo
+- name: Ensure /etc/apt/keyrings exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download Grafana GPG key (ASCII)
+  ansible.builtin.get_url:
+    url: https://apt.grafana.com/gpg.key
+    dest: /etc/apt/keyrings/grafana.asc
+    mode: "0644"
+  register: _loki_grafana_key
+
+- name: Check Grafana keyring exists (dearmored)
+  ansible.builtin.stat:
+    path: /etc/apt/keyrings/grafana.gpg
+  register: _loki_grafana_keyring_stat
+  changed_when: false
+
+- name: Dearmor Grafana key into a keyring
+  ansible.builtin.command: >-
+    gpg --dearmor --yes
+    --output /etc/apt/keyrings/grafana.gpg
+    /etc/apt/keyrings/grafana.asc
+  when: _loki_grafana_key.changed or (not _loki_grafana_keyring_stat.stat.exists)
+
+- name: Remove legacy Grafana APT repo entry (no signed-by)
   ansible.builtin.apt_repository:
     repo: "deb https://apt.grafana.com stable main"
+    state: absent
+
+- name: Add Grafana APT repo (signed-by keyring)
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main"
+    filename: grafana
     state: present
 
 - name: Install Loki
