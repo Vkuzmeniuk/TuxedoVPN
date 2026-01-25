@@ -10,7 +10,7 @@ vpn_cert_auto_issue_enable: true
 
 # ACME challenge method for Certbot auto-issue.
 # Shared defaults can be set via:
-# - tuxedovpn_acme_challenge (dns | http)  (preferred)
+# - tuxedovpn_acme_challenge (dns | http | http_webroot)  (preferred)
 # - tuxedovpn_certbot_method (dns | webroot | standalone) (legacy)
 # - tuxedovpn_certbot_auth_args / tuxedovpn_certbot_extra_args (legacy)
 vpn_certbot_method: >-
@@ -19,12 +19,17 @@ vpn_certbot_method: >-
       'dns'
       if (tuxedovpn_acme_challenge | default('') | string | lower) == 'dns'
       else (
+        'webroot'
+        if (tuxedovpn_acme_challenge | default('') | string | lower) in ['http_webroot', 'http-webroot']
+        else (
         'standalone'
         if (tuxedovpn_acme_challenge | default('') | string | lower) == 'http'
         else (tuxedovpn_certbot_method | default('standalone'))
+        )
       )
     )
-  }} # dns | webroot | standalone
+  }}
+# dns | webroot | standalone
 vpn_certbot_auth_args: "{{ tuxedovpn_certbot_auth_args | default([]) }}"
 vpn_certbot_extra_args: "{{ tuxedovpn_certbot_extra_args | default([]) }}"
 vpn_certbot_standalone_stop_services:

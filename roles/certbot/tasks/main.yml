@@ -16,9 +16,16 @@
   when: >-
     (certbot_deploy_hook_enable | bool)
     or (
-      (certbot_method | default('')) == "standalone"
+      (certbot_method | default('')) in ["standalone", "webroot"]
       and (certbot_standalone_install_renew_hooks | default(true) | bool)
-      and ((certbot_standalone_stop_services | default([])) | length > 0)
+      and (
+        ((certbot_standalone_stop_services | default([])) | length > 0)
+        or (certbot_http01_manage_firewall | default(false) | bool)
+        or (
+          (certbot_method | default('')) == "webroot"
+          and (certbot_manage_webroot_nginx | default(false) | bool)
+        )
+      )
     )
 
 - name: Issue a certificate (certonly)

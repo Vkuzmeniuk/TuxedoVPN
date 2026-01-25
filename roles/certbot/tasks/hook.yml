@@ -30,9 +30,15 @@
     - "{{ certbot_standalone_renew_pre_hook_path | dirname }}"
     - "{{ certbot_standalone_renew_post_hook_path | dirname }}"
   when:
-    - (certbot_method | default('')) == "standalone"
+    - (certbot_method | default('')) in ["standalone", "webroot"]
     - certbot_standalone_install_renew_hooks | default(true) | bool
-    - (certbot_standalone_stop_services | default([]) | length) > 0
+    - >
+      (certbot_standalone_stop_services | default([]) | length) > 0
+      or (certbot_http01_manage_firewall | default(false) | bool)
+      or (
+        (certbot_method | default('')) == "webroot"
+        and (certbot_manage_webroot_nginx | default(false) | bool)
+      )
 
 - name: Install Certbot standalone pre-hook (stop services)
   ansible.builtin.template:
@@ -42,12 +48,34 @@
     group: root
     mode: "0755"
   vars:
-    _certbot_standalone_stop_services: "{{ certbot_standalone_stop_services | default([]) }}"
+    _certbot_http01_stop_services: >-
+      {{
+        (certbot_standalone_stop_services | default([]))
+        if not (
+          (certbot_method | default('')) == 'webroot'
+          and (certbot_manage_webroot_nginx | default(false) | bool)
+        )
+        else (
+          (certbot_standalone_stop_services | default([]))
+          | difference(['nginx', 'nginx.service'])
+        )
+      }}
     _certbot_http01_manage_firewall: "{{ certbot_http01_manage_firewall | default(false) | bool }}"
+    _certbot_webroot_manage_nginx: "{{ ((certbot_method | default('')) == 'webroot') and (certbot_manage_webroot_nginx | default(false) | bool) }}"
+    _certbot_webroot_path: "{{ certbot_webroot_path }}"
+    _certbot_webroot_nginx_conf_path: "{{ certbot_webroot_nginx_conf_path }}"
+    _certbot_webroot_redirect_to_https: "{{ certbot_webroot_redirect_to_https | default(true) | bool }}"
+    _certbot_webroot_disable_default_site: "{{ certbot_webroot_nginx_disable_default_site | default(true) | bool }}"
   when:
-    - (certbot_method | default('')) == "standalone"
+    - (certbot_method | default('')) in ["standalone", "webroot"]
     - certbot_standalone_install_renew_hooks | default(true) | bool
-    - (certbot_standalone_stop_services | default([]) | length) > 0
+    - >
+      (certbot_standalone_stop_services | default([]) | length) > 0
+      or (certbot_http01_manage_firewall | default(false) | bool)
+      or (
+        (certbot_method | default('')) == "webroot"
+        and (certbot_manage_webroot_nginx | default(false) | bool)
+      )
 
 - name: Install Certbot standalone post-hook (start services)
   ansible.builtin.template:
@@ -58,7 +86,15 @@
     mode: "0755"
   vars:
     _certbot_http01_manage_firewall: "{{ certbot_http01_manage_firewall | default(false) | bool }}"
+    _certbot_webroot_manage_nginx: "{{ ((certbot_method | default('')) == 'webroot') and (certbot_manage_webroot_nginx | default(false) | bool) }}"
+    _certbot_webroot_nginx_conf_path: "{{ certbot_webroot_nginx_conf_path }}"
   when:
-    - (certbot_method | default('')) == "standalone"
+    - (certbot_method | default('')) in ["standalone", "webroot"]
     - certbot_standalone_install_renew_hooks | default(true) | bool
-    - (certbot_standalone_stop_services | default([]) | length) > 0
+    - >
+      (certbot_standalone_stop_services | default([]) | length) > 0
+      or (certbot_http01_manage_firewall | default(false) | bool)
+      or (
+        (certbot_method | default('')) == "webroot"
+        and (certbot_manage_webroot_nginx | default(false) | bool)
+      )

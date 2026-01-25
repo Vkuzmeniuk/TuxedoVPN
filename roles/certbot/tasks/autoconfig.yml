@@ -25,19 +25,124 @@
           }}
       changed_when: false
 
+    - name: Normalize Cloudflare API token from vault (strip surrounding quotes/whitespace)
+      ansible.builtin.set_fact:
+        _certbot_cloudflare_api_token_sanitized: >-
+          {{
+            (vault_certbot_cloudflare_api_token | default('') | string | trim)
+            | regex_replace('^"(.*)"$', '\\1')
+            | regex_replace("^'(.*)'$", '\\1')
+            | regex_replace('\\s+', '')
+          }}
+      when: (vault_certbot_cloudflare_api_token | default('') | string | trim | length) > 0
+      no_log: true
+      changed_when: false
+
+    - name: Validate Cloudflare token looks sane (vault_certbot_cloudflare_api_token)
+      ansible.builtin.assert:
+        that:
+          - (_certbot_cloudflare_api_token_sanitized | default('') | trim | length) >= 20
+        fail_msg: >-
+          vault_certbot_cloudflare_api_token looks too short or malformed after sanitization.
+          Paste the full Cloudflare API Token as a single line (no quotes, no spaces/line breaks).
+      when: (vault_certbot_cloudflare_api_token | default('') | string | trim | length) > 0
+      no_log: true
+
     - name: Ensure Cloudflare credentials content is set (from vault token)
       ansible.builtin.set_fact:
         certbot_dns_credentials_content: |-
-          dns_cloudflare_api_token = {{ vault_certbot_cloudflare_api_token | trim }}
+          dns_cloudflare_api_token = {{ _certbot_cloudflare_api_token_sanitized | default(vault_certbot_cloudflare_api_token | trim) }}
       when:
         - (certbot_dns_credentials_content | default('') | trim | length) == 0
         - (vault_certbot_cloudflare_api_token | default('') | string | trim | length) > 0
       no_log: true
       changed_when: false
 
+    - name: Sanitize Cloudflare token quoting in credentials content (if provided via ini)
+      ansible.builtin.set_fact:
+        certbot_dns_credentials_content: >-
+          {{
+            (certbot_dns_credentials_content | default('') | string)
+            | regex_replace('(?m)^\\s*dns_cloudflare_api_token\\s*=\\s*\"([^\"]+)\"\\s*$', 'dns_cloudflare_api_token = \\1')
+            | regex_replace("(?m)^\\s*dns_cloudflare_api_token\\s*=\\s*'([^']+)'\\s*$", 'dns_cloudflare_api_token = \\1')
+          }}
+      when: (certbot_dns_credentials_content | default('') | trim | length) > 0
+      no_log: true
+      changed_when: false
+
+    - name: Fail when token var is set but legacy key/email credentials are provided
+      ansible.builtin.assert:
+        that:
+          - (certbot_dns_credentials_content | default('') | string | regex_search('(?m)^\\s*dns_cloudflare_api_key\\s*=') ) is none
+          - (certbot_dns_credentials_content | default('') | string | regex_search('(?m)^\\s*dns_cloudflare_email\\s*=') ) is none
+        fail_msg: >-
+          Both Cloudflare auth methods are configured:
+          - vault_certbot_cloudflare_api_token is set (token mode), but
+          - certbot_dns_credentials_content contains dns_cloudflare_api_key/dns_cloudflare_email (global API key mode).
+          Choose one:
+          - Recommended: keep vault_certbot_cloudflare_api_token and set vault_certbot_dns_credentials_ini: "".
+          - Or: unset vault_certbot_cloudflare_api_token and provide dns_cloudflare_email + dns_cloudflare_api_key.
+      when:
+        - (vault_certbot_cloudflare_api_token | default('') | string | trim | length) > 0
+        - (certbot_dns_credentials_content | default('') | trim | length) > 0
+      no_log: true
+
+    - name: Prefer Cloudflare token var over placeholder/provided token line
+      ansible.builtin.set_fact:
+        certbot_dns_credentials_content: |-
+          dns_cloudflare_api_token = {{ _certbot_cloudflare_api_token_sanitized | default(vault_certbot_cloudflare_api_token | trim) }}
+      when:
+        - (vault_certbot_cloudflare_api_token | default('') | string | trim | length) > 0
+        - (certbot_dns_credentials_content | default('') | string | regex_search('(?m)^\\s*dns_cloudflare_api_key\\s*=') ) is none
+        - (certbot_dns_credentials_content | default('') | string | regex_search('(?m)^\\s*dns_cloudflare_email\\s*=') ) is none
+        - >
+          (certbot_dns_credentials_content | default('') | trim | length) == 0
+          or ((certbot_dns_credentials_content | default('') | string) is search('(?m)^\\s*dns_cloudflare_api_token\\s*='))
+          or ((certbot_dns_credentials_content | default('') | string) is search('change_me'))
+      no_log: true
+      changed_when: false
+
+    - name: Fail fast on placeholder Cloudflare credentials
+      ansible.builtin.assert:
+        that:
+          - (certbot_dns_credentials_content | default('') | string) is not search('change_me')
+        fail_msg: >-
+          Cloudflare DNS credentials still contain a placeholder value (change_me).
+          Fix your vault:
+          - Preferred: set vault_certbot_cloudflare_api_token to a real API Token and set vault_certbot_dns_credentials_ini to "".
+          - Or: set vault_certbot_dns_credentials_ini to valid Cloudflare credentials content.
+      when: (certbot_dns_credentials_content | default('') | trim | length) > 0
+
+    - name: Validate Cloudflare token format in credentials content
+      ansible.builtin.assert:
+        that:
+          - (certbot_dns_credentials_content | regex_search('(?m)^\\s*dns_cloudflare_api_token\\s*=\\s*[\\\"\\\']')) is none
+        fail_msg: >-
+          Cloudflare API token in certbot DNS credentials appears to be quoted.
+          Ensure the line is like: dns_cloudflare_api_token = <token> (no quotes).
+      when: (certbot_dns_credentials_content | default('') | trim | length) > 0
+      no_log: true
+
+    - name: Ensure Cloudflare credentials are present (token or key/email)
+      ansible.builtin.assert:
+        that:
+          - (certbot_dns_credentials_content | default('') | trim | length) > 0
+          - >
+            ((certbot_dns_credentials_content | default('') | string) is search('(?m)^\\s*dns_cloudflare_api_token\\s*='))
+            or (
+              ((certbot_dns_credentials_content | default('') | string) is search('(?m)^\\s*dns_cloudflare_email\\s*='))
+              and ((certbot_dns_credentials_content | default('') | string) is search('(?m)^\\s*dns_cloudflare_api_key\\s*='))
+            )
+        fail_msg: >-
+          Cloudflare DNS credentials are missing.
+          Set one of:
+          - vault_certbot_cloudflare_api_token (recommended), keeping vault_certbot_dns_credentials_ini: "", or
+          - vault_certbot_dns_credentials_ini with valid Cloudflare credentials content.
+      no_log: true
+
     - name: Ensure Cloudflare auth args are set
       ansible.builtin.set_fact:
-        certbot_auth_args:
+        certbot_auth_args_effective:
           - "--dns-cloudflare"
           - "--dns-cloudflare-credentials"
           - "{{ certbot_dns_credentials_path }}"
@@ -46,5 +151,5 @@
       changed_when: false
   when:
     - (certbot_method | default('') | string) == "dns"
-    - (certbot_auth_args | default([]) | length) == 0
+    - (certbot_auth_args_effective | default([]) | length) == 0
     - _certbot_dns_provider_effective == "cloudflare"

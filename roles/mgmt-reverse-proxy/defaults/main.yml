@@ -60,12 +60,17 @@ mgmt_reverse_proxy_certbot_method: >-
       'dns'
       if (tuxedovpn_acme_challenge | default('') | string | lower) == 'dns'
       else (
+        'webroot'
+        if (tuxedovpn_acme_challenge | default('') | string | lower) in ['http_webroot', 'http-webroot']
+        else (
         'standalone'
         if (tuxedovpn_acme_challenge | default('') | string | lower) == 'http'
         else (tuxedovpn_certbot_method | default('standalone'))
+        )
       )
     )
-  }} # dns | webroot | standalone
+  }}
+# dns | webroot | standalone
 mgmt_reverse_proxy_certbot_auth_args: "{{ tuxedovpn_certbot_auth_args | default([]) }}"
 mgmt_reverse_proxy_certbot_extra_args: "{{ tuxedovpn_certbot_extra_args | default([]) }}"
 mgmt_reverse_proxy_certbot_standalone_stop_services:

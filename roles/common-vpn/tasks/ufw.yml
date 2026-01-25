@@ -11,6 +11,29 @@
       }}
   tags: [ufw]
 
+- name: Discover VPN uplink interface from default route (fallback)
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - -lc
+      - |
+        ip -o route show default 0.0.0.0/0 2>/dev/null \
+          | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}'
+  register: _common_vpn_uplink_iface_route
+  changed_when: false
+  failed_when: false
+  when: (_common_vpn_uplink_iface | default('') | trim) == ""
+  tags: [ufw]
+
+- name: Set VPN uplink interface from default route (fallback)
+  ansible.builtin.set_fact:
+    _common_vpn_uplink_iface: "{{ _common_vpn_uplink_iface_route.stdout | default('') | trim }}"
+  changed_when: false
+  when:
+    - (_common_vpn_uplink_iface | default('') | trim) == ""
+    - (_common_vpn_uplink_iface_route.stdout | default('') | trim) != ""
+  tags: [ufw]
+
 - name: Determine active VPN NAT subnets
   ansible.builtin.set_fact:
     _common_vpn_nat_subnets: "{{ vpn_nat_subnets | default(public_vpn_nat_subnets | default([])) }}"
@@ -212,3 +235,39 @@
     state: enabled
   tags: [ufw]
   notify: Restart UFW
+
+- name: Flush UFW reload after rules edits (needed for immediate NFQUEUE checks)
+  ansible.builtin.meta: flush_handlers
+  when: _common_vpn_enable_mangle | default(false)
+  tags: [ufw]
+
+- name: Read mangle/FORWARD rules (NFQUEUE self-check)
+  ansible.builtin.command:
+    argv: ["iptables", "-t", "mangle", "-S", "FORWARD"]
+  register: _common_vpn_mangle_forward_rules
+  changed_when: false
+  when:
+    - _common_vpn_enable_mangle | default(false)
+  tags: [ufw]
+
+- name: Assert NFQUEUE hooks are present in mangle/FORWARD when enabled
+  ansible.builtin.assert:
+    that:
+      - (_common_vpn_mangle_forward_rules.rc | default(1) | int) == 0
+      - >
+        (
+          (_common_vpn_mangle_forward_rules.stdout | default(''))
+          | regex_search('(?m)^-A FORWARD .* -j NFQUEUE .*--queue-num\\s+' ~ ((vpn_nfqueue_num | default(dpi_suricata_queue_num | default(0))) | int))
+        ) is not none
+    fail_msg: >-
+      vpn_enable_mangle=true but no NFQUEUE rules are present in iptables mangle/FORWARD.
+      This means UFW did not apply the injected *mangle section from /etc/ufw/before.rules.
+      Troubleshooting:
+      - Ensure UFW is enabled and reload succeeded.
+      - Ensure the uplink interface is detected (set vpn_uplink_iface explicitly if needed).
+      - Check /etc/ufw/before.rules contains the marker "PRIVATE_VPN_MANGLE".
+      iptables -t mangle -S FORWARD output:
+      {{ _common_vpn_mangle_forward_rules.stdout | default('') | trim }}
+  when:
+    - _common_vpn_enable_mangle | default(false)
+  tags: [ufw]

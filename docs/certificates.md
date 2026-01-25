@@ -14,7 +14,7 @@ tuxedovpn_tls_mode: "selfsigned" # selfsigned | certbot
 ACME validation method can also be set per host (recommended):
 
 ```yaml
-tuxedovpn_acme_challenge: "dns" # dns | http
+tuxedovpn_acme_challenge: "dns" # dns | http | http_webroot
 tuxedovpn_acme_dns_provider: "cloudflare"
 ```
 
@@ -73,6 +73,14 @@ Example (Cloudflare token):
 - Vault:
   - `vault_certbot_email`
   - `vault_certbot_cloudflare_api_token` (recommended), or `vault_certbot_dns_credentials_ini`
+  - Note: don’t wrap the token in quotes; it should be a raw token string.
+  - The registrar (e.g. Namecheap) does not matter: what matters is where DNS is hosted.
+    For Cloudflare DNS-01, the zone must exist in Cloudflare and your domain must use Cloudflare nameservers.
+  - Cloudflare API Token permissions (minimum):
+    - `Zone` → `Zone` → `Read` (needed to list zones / find zone_id)
+    - `Zone` → `DNS` → `Edit` (needed to create TXT records for ACME)
+  - If you enable “Client IP Address Filtering” on the token, include your server public IP (otherwise DNS-01 will fail from the host).
+  - If you use `vault_certbot_cloudflare_api_token`, keep `vault_certbot_dns_credentials_ini: ""` so the role generates the credentials file from the token.
 
 ### HTTP-01 (standalone, easiest with plain A-records)
 
@@ -85,6 +93,32 @@ Use this when:
 This uses Certbot in `standalone` mode (HTTP-01) on `:80`.
 For safety, the role does not modify firewall rules by default.
 If you choose HTTP-01, ensure `tcp/80` is reachable from the Internet (UFW allow), or explicitly enable temporary iptables rule insertion via `certbot_http01_manage_firewall: true`.
+
+For the “closed by default” setup (recommended), set:
+
+```yaml
+certbot_http01_manage_firewall: true
+```
+
+This keeps port `80/tcp` closed normally and opens it only for the short ACME validation window during issue/renew.
+
+### HTTP-01 (webroot + minimal nginx for ACME only)
+
+This is a more “proxy-like” HTTP-01 flow:
+
+- During issue/renew, Ansible (and the installed Certbot renewal hooks) temporarily run a minimal nginx listener on `80/tcp` that:
+  - serves only `/.well-known/acme-challenge/`
+  - redirects all other requests to `https://$host/...` (so they hit ocserv camouflage / normal TLS)
+- Enable it via:
+
+```yaml
+tuxedovpn_acme_challenge: "http_webroot" # dns | http | http_webroot
+```
+
+Notes:
+
+- Port `80/tcp` must be reachable from the Internet for validation.
+- If something normally listens on port 80 (e.g. Pi-hole), it will be stopped only for the short validation window and started again afterwards.
 
 ## Issuing certificates (via `site.yml`)
 
@@ -120,7 +154,7 @@ Roles that auto-issue certificates via `roles/certbot` (ocserv and mgmt reverse 
 To switch globally, set a single variable:
 
 ```yaml
-tuxedovpn_acme_challenge: "dns" # dns | http
+tuxedovpn_acme_challenge: "dns" # dns | http | http_webroot
 ```
 
 Optional (Cloudflare convenience autoconfig):

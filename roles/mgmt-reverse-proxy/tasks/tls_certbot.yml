@@ -36,6 +36,10 @@
       }}
     certbot_cert_name: "{{ mgmt_reverse_proxy_cert_name }}"
     certbot_method: "{{ mgmt_reverse_proxy_certbot_method | default('standalone') }}"
+    certbot_manage_webroot_nginx: >-
+      {{
+        (tuxedovpn_acme_challenge | default('') | string | lower) in ['http_webroot', 'http-webroot']
+      }}
     certbot_auth_args: "{{ mgmt_reverse_proxy_certbot_auth_args | default([]) }}"
     certbot_extra_args: "{{ mgmt_reverse_proxy_certbot_extra_args | default([]) }}"
     certbot_standalone_stop_services: "{{ mgmt_reverse_proxy_certbot_standalone_stop_services | default(['pihole-FTL','nginx','apache2']) }}"

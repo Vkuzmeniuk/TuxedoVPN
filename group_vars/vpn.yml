@@ -12,6 +12,10 @@ ufw_extra_rules:
   - { port: "{{ dpi_agent_port | default(9815) }}", proto: tcp, direction: in, src: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
 
 vpn_cert_use_existing: "{{ (tuxedovpn_tls_mode | default('selfsigned')) == 'certbot' }}"
+
+# When using HTTP-01 (standalone) we keep inbound tcp/80 closed by default and
+# open it briefly via iptables only during ACME validation (issue/renew).
+certbot_http01_manage_firewall: true
 vpn_listen_host: "0.0.0.0"
 vpn_listen_proxy_proto: false
 vpn_radius_accounting: true

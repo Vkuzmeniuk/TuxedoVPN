@@ -46,31 +46,30 @@
     mode: "0755"
   when: certbot_method == "webroot"
 
+- name: Check whether nginx is active before install (webroot helper)
+  ansible.builtin.command: systemctl is-active nginx
+  register: _certbot_nginx_active_preinstall
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_service_mgr == "systemd"
+    - certbot_method == "webroot"
+    - certbot_manage_webroot_nginx | bool
+
+- name: Remember whether nginx was active before install (webroot helper)
+  ansible.builtin.set_fact:
+    _certbot_nginx_was_active_preinstall: >-
+      {{ (_certbot_nginx_active_preinstall.stdout | default('') | trim) == 'active' }}
+  changed_when: false
+  when:
+    - ansible_service_mgr == "systemd"
+    - certbot_method == "webroot"
+    - certbot_manage_webroot_nginx | bool
+
 - name: Ensure nginx is installed (optional helper for HTTP-01)
   ansible.builtin.package:
     name: nginx
     state: present
-  when:
-    - certbot_method == "webroot"
-    - certbot_manage_webroot_nginx | bool
-
-- name: Deploy nginx webroot config for ACME challenges
-  ansible.builtin.template:
-    src: letsencrypt-webroot.nginx.conf.j2
-    dest: "{{ certbot_webroot_nginx_conf_path }}"
-    owner: root
-    group: root
-    mode: "0644"
-  when:
-    - certbot_method == "webroot"
-    - certbot_manage_webroot_nginx | bool
-  notify: Reload nginx
-
-- name: Ensure nginx is enabled and running (optional helper)
-  ansible.builtin.service:
-    name: nginx
-    state: started
-    enabled: true
   when:
     - certbot_method == "webroot"
     - certbot_manage_webroot_nginx | bool

@@ -21,6 +21,10 @@ grafana_freeradius_datasource_postgres_version: 1400
 
 vpn_cert_use_existing: "{{ (tuxedovpn_tls_mode | default('selfsigned')) == 'certbot' }}"
 
+# When using HTTP-01 (standalone) we keep inbound tcp/80 closed by default and
+# open it briefly via iptables only during ACME validation (issue/renew).
+certbot_http01_manage_firewall: true
+
 # Authentication is handled by the local FreeRADIUS instance
 vpn_auth_mode: "radius"
 vpn_radius_accounting: true

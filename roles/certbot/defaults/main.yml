@@ -19,7 +19,7 @@ certbot_cert_name: ""
 # - dns: requires provider/plugin-specific arguments (recommended for wildcards and hosts behind an L4 proxy)
 # - webroot: requires HTTP/80 reachability to the host and a webroot serving `/.well-known/acme-challenge/`
 # - standalone: certbot runs its own temporary HTTP-01 listener on :80 (no TLS-ALPN support in the standalone plugin)
-certbot_method: "dns" # dns | webroot | standalone
+certbot_method: "standalone" # dns | webroot | standalone
 
 # When using standalone (HTTP-01), the role can optionally insert a temporary iptables rule
 # to allow inbound tcp/80 for ACME validation without editing UFW config.
@@ -44,10 +44,15 @@ certbot_standalone_renew_post_hook_path: "/etc/letsencrypt/renewal-hooks/post/tu
 certbot_auth_args: []
 certbot_extra_args: []
 
+# Computed args used by the role (allows autoconfig to work even when the role is included with empty vars).
+certbot_auth_args_effective: "{{ certbot_auth_args | default([]) }}"
+
 # webroot support (HTTP-01)
 certbot_webroot_path: "/var/www/letsencrypt"
 certbot_manage_webroot_nginx: false
 certbot_webroot_nginx_conf_path: "/etc/nginx/conf.d/letsencrypt-webroot.conf"
+certbot_webroot_redirect_to_https: true
+certbot_webroot_nginx_disable_default_site: true
 
 # DNS credentials file (needed only if the plugin requires it).
 certbot_dns_credentials_path: "/etc/letsencrypt/dns-credentials.ini"

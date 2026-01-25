@@ -1,9 +1,11 @@
 ---
-- name: Collect service facts (standalone)
+- name: Collect service facts (HTTP-01)
   ansible.builtin.service_facts:
   when:
-    - (certbot_method | default('')) == "standalone"
-    - (certbot_standalone_stop_services | default([]) | length) > 0
+    - (certbot_method | default('')) in ["standalone", "webroot"]
+    - >
+      (certbot_standalone_stop_services | default([]) | length) > 0
+      or (certbot_manage_webroot_nginx | default(false) | bool)
 
 - name: Prevent unsupported TLS-ALPN preference in standalone mode
   ansible.builtin.assert:
@@ -15,8 +17,24 @@
       Remove tls-alpn from certbot_extra_args or switch to DNS-01 (certbot_method=dns + certbot_auth_args).
   when: (certbot_method | default('')) == "standalone"
 
-- name: Renew certificates via certbot (with optional standalone pre-stop)
+- name: Renew certificates via certbot (with optional HTTP-01 pre-stop)
   block:
+    - name: Compute effective stop-services list for HTTP-01
+      ansible.builtin.set_fact:
+        _certbot_http01_stop_services_effective: >-
+          {{
+            (certbot_standalone_stop_services | default([]))
+            if not (
+              (certbot_method | default('')) == 'webroot'
+              and (certbot_manage_webroot_nginx | default(false) | bool)
+            )
+            else (
+              (certbot_standalone_stop_services | default([]))
+              | difference(['nginx', 'nginx.service'])
+            )
+          }}
+      changed_when: false
+
     - name: Determine iptables chain for temporary HTTP-01 allow
       ansible.builtin.shell: |
         set -euo pipefail
@@ -30,7 +48,7 @@
       register: _certbot_http01_chain
       changed_when: false
       when:
-        - (certbot_method | default('')) == "standalone"
+        - (certbot_method | default('')) in ["standalone", "webroot"]
         - certbot_http01_manage_firewall | default(false) | bool
 
     - name: Check temporary HTTP-01 allow rule (tcp/80)
@@ -43,7 +61,7 @@
       changed_when: false
       failed_when: false
       when:
-        - (certbot_method | default('')) == "standalone"
+        - (certbot_method | default('')) in ["standalone", "webroot"]
         - certbot_http01_manage_firewall | default(false) | bool
 
     - name: Insert temporary HTTP-01 allow rule (tcp/80)
@@ -55,37 +73,102 @@
       register: _certbot_http01_rule_add
       changed_when: true
       when:
-        - (certbot_method | default('')) == "standalone"
+        - (certbot_method | default('')) in ["standalone", "webroot"]
         - certbot_http01_manage_firewall | default(false) | bool
         - _certbot_http01_rule_check is defined
         - (_certbot_http01_rule_check.rc | default(1) | int) != 0
 
-    - name: Stop services for standalone renew (to free the port)
+    - name: Stop services for HTTP-01 renew (to free tcp/80)
       ansible.builtin.service:
         name: "{{ item }}"
         state: stopped
-      loop: "{{ certbot_standalone_stop_services | default([]) }}"
-      register: _certbot_standalone_stop
+      loop: "{{ _certbot_http01_stop_services_effective | default([]) }}"
+      register: _certbot_http01_stop
       when:
-        - (certbot_method | default('')) == "standalone"
-        - (certbot_standalone_stop_services | default([]) | length) > 0
+        - (certbot_method | default('')) in ["standalone", "webroot"]
+        - (_certbot_http01_stop_services_effective | default([]) | length) > 0
         - >
           (ansible_facts.services[item ~ '.service'] is defined)
           or (ansible_facts.services[item] is defined)
 
-    - name: Compute services to restart after standalone renew
+    - name: Compute services to restart after HTTP-01 renew
       ansible.builtin.set_fact:
-        _certbot_standalone_services_to_restart: >-
+        _certbot_http01_services_to_restart: >-
           {{
-            (_certbot_standalone_stop.results | default([]))
+            (_certbot_http01_stop.results | default([]))
             | selectattr('changed', 'equalto', true)
             | map(attribute='item')
             | list
           }}
       when:
-        - (certbot_method | default('')) == "standalone"
-        - (certbot_standalone_stop_services | default([]) | length) > 0
+        - (certbot_method | default('')) in ["standalone", "webroot"]
+        - (_certbot_http01_stop_services_effective | default([]) | length) > 0
       changed_when: false
+
+    - name: Remember whether nginx was active before HTTP-01 (webroot helper)
+      ansible.builtin.set_fact:
+        _certbot_nginx_was_active: >-
+          {{
+            (_certbot_nginx_was_active_preinstall | bool)
+            if (_certbot_nginx_was_active_preinstall is defined)
+            else (
+              (ansible_facts.services['nginx.service'].state | default('')) == 'running'
+              or (ansible_facts.services['nginx'].state | default('')) == 'running'
+            )
+          }}
+      when:
+        - (certbot_method | default('')) == "webroot"
+        - certbot_manage_webroot_nginx | default(false) | bool
+      changed_when: false
+
+    - name: Disable nginx default site when nginx is started temporarily (webroot helper)
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - -lc
+          - |
+            set -euo pipefail
+            src="/etc/nginx/sites-enabled/default"
+            dst="/etc/nginx/sites-enabled/default.tuxedovpn-disabled"
+            if [[ -e "${src}" ]]; then
+              mv -f "${src}" "${dst}"
+              echo moved
+            else
+              echo absent
+            fi
+      register: _certbot_nginx_default_site_disable
+      changed_when: (_certbot_nginx_default_site_disable.stdout | default('') | trim) == "moved"
+      when:
+        - (certbot_method | default('')) == "webroot"
+        - certbot_manage_webroot_nginx | default(false) | bool
+        - certbot_webroot_nginx_disable_default_site | default(true) | bool
+        - not (_certbot_nginx_was_active | default(false) | bool)
+
+    - name: Deploy temporary nginx webroot config for ACME (webroot helper)
+      ansible.builtin.template:
+        src: letsencrypt-webroot.nginx.conf.j2
+        dest: "{{ certbot_webroot_nginx_conf_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when:
+        - (certbot_method | default('')) == "webroot"
+        - certbot_manage_webroot_nginx | default(false) | bool
+      notify: Reload nginx
+
+    - name: Ensure nginx is started for HTTP-01 renew (webroot helper)
+      ansible.builtin.service:
+        name: nginx
+        state: started
+      when:
+        - (certbot_method | default('')) == "webroot"
+        - certbot_manage_webroot_nginx | default(false) | bool
+
+    - name: Reload nginx to pick up ACME config (webroot helper)
+      ansible.builtin.meta: flush_handlers
+      when:
+        - (certbot_method | default('')) == "webroot"
+        - certbot_manage_webroot_nginx | default(false) | bool
 
     - name: Renew certificates via certbot
       ansible.builtin.command: >-
@@ -97,14 +180,62 @@
       changed_when: >-
         ('No renewals were attempted' not in (_certbot_renew.stdout | default('')))
   always:
-    - name: Start services stopped for standalone renew
+    - name: Remove temporary nginx webroot config (webroot helper)
+      ansible.builtin.file:
+        path: "{{ certbot_webroot_nginx_conf_path }}"
+        state: absent
+      when:
+        - (certbot_method | default('')) == "webroot"
+        - certbot_manage_webroot_nginx | default(false) | bool
+      notify: Reload nginx
+
+    - name: Reload nginx to drop ACME listener (webroot helper)
+      ansible.builtin.meta: flush_handlers
+      when:
+        - (certbot_method | default('')) == "webroot"
+        - certbot_manage_webroot_nginx | default(false) | bool
+
+    - name: Stop nginx when it was started only for HTTP-01 (webroot helper)
+      ansible.builtin.service:
+        name: nginx
+        state: stopped
+      when:
+        - (certbot_method | default('')) == "webroot"
+        - certbot_manage_webroot_nginx | default(false) | bool
+        - not (_certbot_nginx_was_active | default(false) | bool)
+
+    - name: Restore nginx default site when nginx was started temporarily (webroot helper)
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - -lc
+          - |
+            set -euo pipefail
+            src="/etc/nginx/sites-enabled/default.tuxedovpn-disabled"
+            dst="/etc/nginx/sites-enabled/default"
+            if [[ -e "${src}" ]]; then
+              mv -f "${src}" "${dst}"
+              echo restored
+            else
+              echo absent
+            fi
+      register: _certbot_nginx_default_site_restore
+      changed_when: (_certbot_nginx_default_site_restore.stdout | default('') | trim) == "restored"
+      when:
+        - (certbot_method | default('')) == "webroot"
+        - certbot_manage_webroot_nginx | default(false) | bool
+        - certbot_webroot_nginx_disable_default_site | default(true) | bool
+        - not (_certbot_nginx_was_active | default(false) | bool)
+      failed_when: false
+
+    - name: Start services stopped for HTTP-01 renew
       ansible.builtin.service:
         name: "{{ item }}"
         state: started
-      loop: "{{ _certbot_standalone_services_to_restart | default([]) }}"
+      loop: "{{ _certbot_http01_services_to_restart | default([]) }}"
       when:
-        - (certbot_method | default('')) == "standalone"
-        - (_certbot_standalone_services_to_restart | default([]) | length) > 0
+        - (certbot_method | default('')) in ["standalone", "webroot"]
+        - (_certbot_http01_services_to_restart | default([]) | length) > 0
 
     - name: Remove temporary HTTP-01 allow rule (tcp/80)
       ansible.builtin.command: >-
@@ -115,7 +246,7 @@
       changed_when: true
       failed_when: false
       when:
-        - (certbot_method | default('')) == "standalone"
+        - (certbot_method | default('')) in ["standalone", "webroot"]
         - certbot_http01_manage_firewall | default(false) | bool
         - _certbot_http01_rule_check is defined
         - (_certbot_http01_rule_check.rc | default(0) | int) != 0

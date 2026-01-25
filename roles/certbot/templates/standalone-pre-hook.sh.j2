@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Managed by Ansible (role: certbot)
-# Called by certbot before renewals when using standalone mode.
+# Called by certbot before renewals when using HTTP-01 (standalone/webroot).
 #
 # Stops selected services to free ports required by the ACME challenge (typically :443).
 
@@ -26,19 +26,74 @@ if command -v iptables >/dev/null 2>&1; then
 fi
 {% endif %}
 
-{% set services = (_certbot_standalone_stop_services | default([])) %}
+{% set services = (_certbot_http01_stop_services | default([])) %}
 {% if services | length == 0 %}
-exit 0
+true
 {% endif %}
 
-for svc in {{ services | to_json }}; do
-  unit="${svc}"
-  if systemctl list-unit-files --no-legend --no-pager | awk '{print $1}' | grep -qx "${svc}.service"; then
-    unit="${svc}.service"
-  fi
+if {{ (services | length > 0) | ternary('true','false') }}; then
+  for svc in {{ services | to_json }}; do
+    unit="${svc}"
+    if systemctl list-unit-files --no-legend --no-pager | awk '{print $1}' | grep -qx "${svc}.service"; then
+      unit="${svc}.service"
+    fi
 
-  if systemctl is-active --quiet "${unit}"; then
-    systemctl stop "${unit}" >/dev/null 2>&1 || true
-    echo "${unit}" >> "${STATE_FILE}"
+    if systemctl is-active --quiet "${unit}"; then
+      systemctl stop "${unit}" >/dev/null 2>&1 || true
+      echo "${unit}" >> "${STATE_FILE}"
+    fi
+  done
+fi
+
+{% if _certbot_webroot_manage_nginx | default(false) | bool %}
+# For webroot renewals, run a minimal nginx listener on :80 that serves only the ACME path
+# and redirects everything else to https (to hit ocserv camouflage / normal TLS).
+NGINX_CONF="{{ _certbot_webroot_nginx_conf_path }}"
+DEFAULT_SITE="/etc/nginx/sites-enabled/default"
+DEFAULT_SITE_DISABLED="/etc/nginx/sites-enabled/default.tuxedovpn-disabled"
+
+NGINX_WAS_ACTIVE="0"
+if systemctl is-active --quiet nginx; then
+  NGINX_WAS_ACTIVE="1"
+  echo "nginx:was_active" >> "${STATE_FILE}"
+fi
+
+{% if _certbot_webroot_disable_default_site | default(true) | bool %}
+if [[ "${NGINX_WAS_ACTIVE}" == "0" ]]; then
+  if [[ -e "${DEFAULT_SITE}" ]]; then
+    mv -f "${DEFAULT_SITE}" "${DEFAULT_SITE_DISABLED}" >/dev/null 2>&1 || true
+    echo "nginx:default_site_disabled" >> "${STATE_FILE}"
   fi
-done
+fi
+{% endif %}
+
+cat > "${NGINX_CONF}" <<'NGINX'
+# Managed by Certbot pre-hook (Ansible role: certbot)
+server {
+    listen 80;
+    server_name ~^.*$;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root {{ _certbot_webroot_path }};
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+    location / {
+{% if _certbot_webroot_redirect_to_https | default(true) | bool %}
+        return 301 https://$host$request_uri;
+{% else %}
+        return 404;
+{% endif %}
+    }
+}
+NGINX
+
+if [[ "${NGINX_WAS_ACTIVE}" == "0" ]]; then
+  systemctl start nginx >/dev/null 2>&1 || true
+  echo "nginx:started" >> "${STATE_FILE}"
+fi
+if systemctl is-active --quiet nginx; then
+  systemctl reload nginx >/dev/null 2>&1 || true
+fi
+{% endif %}

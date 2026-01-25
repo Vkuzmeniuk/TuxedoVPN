@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Managed by Ansible (role: certbot)
-# Called by certbot after renewals when using standalone mode.
+# Called by certbot after renewals when using HTTP-01 (standalone/webroot).
 #
 # Starts only services that were stopped by the pre-hook.
 
@@ -13,6 +13,9 @@ fi
 
 RULE_COMMENT="tuxedovpn-certbot-http01"
 CHAIN=""
+NGINX_STARTED_BY_HOOK="0"
+NGINX_DEFAULT_SITE_DISABLED="0"
+SERVICES=()
 
 while IFS= read -r line; do
   [[ -z "${line}" ]] && continue
@@ -20,13 +23,46 @@ while IFS= read -r line; do
     CHAIN="${line#iptables:}"
     continue
   fi
-  systemctl start "${line}" >/dev/null 2>&1 || true
+  if [[ "${line}" == "nginx:started" ]]; then
+    NGINX_STARTED_BY_HOOK="1"
+    continue
+  fi
+  if [[ "${line}" == "nginx:default_site_disabled" ]]; then
+    NGINX_DEFAULT_SITE_DISABLED="1"
+    continue
+  fi
+  if [[ "${line}" == "nginx:was_active" ]]; then
+    continue
+  fi
+  SERVICES+=("${line}")
 done < "${STATE_FILE}"
+
+{% if _certbot_webroot_manage_nginx | default(false) | bool %}
+NGINX_CONF="{{ _certbot_webroot_nginx_conf_path }}"
+DEFAULT_SITE="/etc/nginx/sites-enabled/default"
+DEFAULT_SITE_DISABLED="/etc/nginx/sites-enabled/default.tuxedovpn-disabled"
+rm -f "${NGINX_CONF}" >/dev/null 2>&1 || true
+if systemctl is-active --quiet nginx; then
+  systemctl reload nginx >/dev/null 2>&1 || true
+fi
+if [[ "${NGINX_DEFAULT_SITE_DISABLED}" == "1" ]]; then
+  if [[ -e "${DEFAULT_SITE_DISABLED}" ]]; then
+    mv -f "${DEFAULT_SITE_DISABLED}" "${DEFAULT_SITE}" >/dev/null 2>&1 || true
+  fi
+fi
+if [[ "${NGINX_STARTED_BY_HOOK}" == "1" ]]; then
+  systemctl stop nginx >/dev/null 2>&1 || true
+fi
+{% endif %}
 
 {% if _certbot_http01_manage_firewall | default(false) %}
 if [[ -n "${CHAIN}" ]] && command -v iptables >/dev/null 2>&1; then
   iptables -D "${CHAIN}" -p tcp --dport 80 -m comment --comment "${RULE_COMMENT}" -j ACCEPT >/dev/null 2>&1 || true
 fi
 {% endif %}
+
+for unit in "${SERVICES[@]}"; do
+  systemctl start "${unit}" >/dev/null 2>&1 || true
+done
 
 rm -f "${STATE_FILE}"

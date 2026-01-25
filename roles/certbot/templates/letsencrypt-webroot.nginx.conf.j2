@@ -3,7 +3,9 @@
 
 server {
     listen 80;
-    server_name _;
+    # Match any Host header so this server block is selected even if another
+    # default server exists for :80 on the host.
+    server_name ~^.*$;
 
     location ^~ /.well-known/acme-challenge/ {
         root {{ certbot_webroot_path }};
@@ -12,6 +14,10 @@ server {
     }
 
     location / {
+{% if certbot_webroot_redirect_to_https | default(true) | bool %}
+        return 301 https://$host$request_uri;
+{% else %}
         return 404;
+{% endif %}
     }
 }

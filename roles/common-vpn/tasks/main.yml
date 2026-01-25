@@ -172,6 +172,10 @@
       - "{{ vpn_domain }}"
     certbot_cert_name: "{{ vpn_domain }}"
     certbot_method: "{{ vpn_certbot_method | default('standalone') }}"
+    certbot_manage_webroot_nginx: >-
+      {{
+        (tuxedovpn_acme_challenge | default('') | string | lower) in ['http_webroot', 'http-webroot']
+      }}
     certbot_auth_args: "{{ vpn_certbot_auth_args | default([]) }}"
     certbot_extra_args: "{{ vpn_certbot_extra_args | default([]) }}"
     certbot_standalone_stop_services: "{{ vpn_certbot_standalone_stop_services | default(['nginx','apache2','pihole-FTL']) }}"
