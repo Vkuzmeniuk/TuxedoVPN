@@ -68,43 +68,49 @@ def _is_tty() -> bool:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="tuxedo", description="Manage VPN users/groups via SQL (FreeRADIUS/PostgreSQL).")
-    p.add_argument("--config", help="Path to tuxedo.ini (optional).")
-    p.add_argument("--sql", action="store_true", help="Print SQL only (do not execute).")
-    p.add_argument(
+    global_args = argparse.ArgumentParser(add_help=False)
+    global_args.add_argument("--config", help="Path to tuxedo.ini (optional).")
+    global_args.add_argument("--sql", action="store_true", help="Print SQL only (do not execute).")
+    global_args.add_argument(
         "--show-secrets",
         action="store_true",
-        help="Do not redact sensitive params (e.g., passwords) in generated output.",
+        help="Do not redact sensitive params (e.g., passwords) when printing SQL (--sql).",
     )
-    p.add_argument(
+    global_args.add_argument(
         "--output",
         choices=["text", "json"],
         default="text",
         help="Output format for generated SQL / execution results.",
     )
 
+    p = argparse.ArgumentParser(
+        prog="tuxedo",
+        description="Manage VPN users/groups via SQL (FreeRADIUS/PostgreSQL).",
+        parents=[global_args],
+    )
+
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    migrate = sub.add_parser("migrate", help="Create/upgrade required helper tables (idempotent).")
+    migrate = sub.add_parser("migrate", help="Create/upgrade required helper tables (idempotent).", parents=[global_args])
     migrate.set_defaults(action="migrate")
 
-    create = sub.add_parser("create", help="Create a user or a group.")
+    create = sub.add_parser("create", help="Create a user or a group.", parents=[global_args])
     create_sub = create.add_subparsers(dest="entity", required=True)
-    create_user = create_sub.add_parser("user", help="Create user (radcheck).")
+    create_user = create_sub.add_parser("user", help="Create user (radcheck).", parents=[global_args])
     create_user.add_argument("name")
     create_user.add_argument("--password", help="User password (Cleartext-Password). If omitted, prompt.")
     create_user.set_defaults(action="create_user")
-    create_group = create_sub.add_parser("group", help="Create group (vpn_groups).")
+    create_group = create_sub.add_parser("group", help="Create group (vpn_groups).", parents=[global_args])
     create_group.add_argument("name")
     create_group.add_argument("--description")
     create_group.set_defaults(action="create_group")
 
-    delete = sub.add_parser("delete", help="Delete a user or a group.")
+    delete = sub.add_parser("delete", help="Delete a user or a group.", parents=[global_args])
     delete_sub = delete.add_subparsers(dest="entity", required=True)
-    delete_user = delete_sub.add_parser("user", help="Delete user (radcheck, radusergroup, blocklist).")
+    delete_user = delete_sub.add_parser("user", help="Delete user (radcheck, radusergroup, blocklist).", parents=[global_args])
     delete_user.add_argument("name")
     delete_user.set_defaults(action="delete_user")
-    delete_group = delete_sub.add_parser("group", help="Delete group (vpn_groups) and remove memberships.")
+    delete_group = delete_sub.add_parser("group", help="Delete group (vpn_groups) and remove memberships.", parents=[global_args])
     delete_group.add_argument("name")
     delete_group.add_argument(
         "--reassign-orphans-to",
@@ -113,55 +119,59 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     delete_group.set_defaults(action="delete_group")
 
-    change = sub.add_parser("change", help="Change a user or a group.")
+    change = sub.add_parser("change", help="Change a user or a group.", parents=[global_args])
     change_sub = change.add_subparsers(dest="entity", required=True)
-    change_user = change_sub.add_parser("user", help="Change user (currently: password only).")
+    change_user = change_sub.add_parser("user", help="Change user (currently: password only).", parents=[global_args])
     change_user.add_argument("name")
     change_user.add_argument("--password", help="New password. If omitted, prompt.")
     change_user.set_defaults(action="change_user")
-    change_group = change_sub.add_parser("group", help="Change group (rename/description).")
+    change_group = change_sub.add_parser("group", help="Change group (rename/description).", parents=[global_args])
     change_group.add_argument("name")
     change_group.add_argument("--rename")
     change_group.add_argument("--description")
     change_group.set_defaults(action="change_group")
 
-    add = sub.add_parser("add", help="Add user to group (radusergroup).")
+    add = sub.add_parser("add", help="Add user to group (radusergroup).", parents=[global_args])
     add.add_argument("user")
     add.add_argument("group")
     add.add_argument("--priority", type=int, default=0)
     add.set_defaults(action="add")
 
-    remove = sub.add_parser("remove", help="Remove user from group (radusergroup).")
+    remove = sub.add_parser("remove", help="Remove user from group (radusergroup).", parents=[global_args])
     remove.add_argument("user")
     remove.add_argument("group")
     remove.set_defaults(action="remove")
 
-    block = sub.add_parser("block", help="Block user (vpn_user_blocklist).")
+    block = sub.add_parser("block", help="Block user (vpn_user_blocklist).", parents=[global_args])
     block.add_argument("user")
     block.add_argument("--reason", default="MANUAL")
     block.add_argument("--for", dest="duration", help="Duration like 15m/2h/1d. Omit for permanent block.")
     block.set_defaults(action="block")
 
-    unblock = sub.add_parser("unblock", help="Unblock user (vpn_user_blocklist).")
+    unblock = sub.add_parser("unblock", help="Unblock user (vpn_user_blocklist).", parents=[global_args])
     unblock.add_argument("user")
     unblock.set_defaults(action="unblock")
 
-    show = sub.add_parser("show", help="Show users/groups/blocks (read-only).")
+    show = sub.add_parser("show", help="Show users/groups/blocks (read-only).", parents=[global_args])
     show_sub = show.add_subparsers(dest="entity", required=True)
-    show_users = show_sub.add_parser("users", help="List users.")
+    show_users = show_sub.add_parser("users", help="List users.", parents=[global_args])
     show_users.set_defaults(action="show_users")
-    show_groups = show_sub.add_parser("groups", help="List groups.")
+    show_groups = show_sub.add_parser("groups", help="List groups.", parents=[global_args])
     show_groups.set_defaults(action="show_groups")
-    show_blocks = show_sub.add_parser("blocks", help="List blocks.")
+    show_blocks = show_sub.add_parser("blocks", help="List blocks.", parents=[global_args])
     show_blocks.add_argument("--all", action="store_true", help="Include expired blocks.")
     show_blocks.set_defaults(action="show_blocks")
 
-    find = sub.add_parser("find", help="Find a user (LIKE search) or show a group (exact name).")
+    find = sub.add_parser("find", help="Find a user (LIKE search) or show a group (exact name).", parents=[global_args])
     find_sub = find.add_subparsers(dest="entity", required=True)
-    find_user = find_sub.add_parser("user", help="Find users and show groups + block status (supports '*' wildcards).")
+    find_user = find_sub.add_parser(
+        "user",
+        help="Find users and show groups + block status (supports '*' wildcards).",
+        parents=[global_args],
+    )
     find_user.add_argument("name")
     find_user.set_defaults(action="find_user")
-    find_group = find_sub.add_parser("group", help="Show group details (members).")
+    find_group = find_sub.add_parser("group", help="Show group details (members).", parents=[global_args])
     find_group.add_argument("name")
     find_group.set_defaults(action="find_group")
 
@@ -186,6 +196,8 @@ def _print_results_text(results):
 
 def _main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if bool(getattr(args, "show_secrets", False)) and not bool(getattr(args, "sql", False)):
+        sys.stderr.write("warning: --show-secrets has effect only with --sql; ignoring.\n")
     cfg = load_config(args.config)
     backend = FreeradiusBackend(cfg.freeradius)
 

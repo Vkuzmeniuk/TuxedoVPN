@@ -37,7 +37,7 @@ tuxedo show blocks --all
 Notes:
 
 - If you omit `--password`, it will prompt.
-- Sensitive params are redacted by default; add `--show-secrets` if you really need to print them.
+- When printing SQL (`--sql`), sensitive params are redacted by default; add `--show-secrets` if you really need to print them.
 - Each command runs in a single transaction.
 
 ## Install / config

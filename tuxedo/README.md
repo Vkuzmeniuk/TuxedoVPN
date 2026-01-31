@@ -32,7 +32,7 @@ tuxedo add alice admins
 tuxedo block alice --reason MANUAL --for 2h
 ```
 
-By default sensitive parameters (for example, passwords) are redacted in output. If you need raw values, use `--show-secrets`.
+When printing SQL (`--sql`), sensitive parameters (for example, passwords) are redacted by default. If you need raw values, use `--show-secrets`.
 
 New users are automatically added to the default group (config: `freeradius.default_group_name`) if they have no groups yet.
 
