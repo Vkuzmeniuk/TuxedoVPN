@@ -93,6 +93,20 @@ vpn_routes:
 # UFW allowlisting.
 pihole_dns_permit_all_origins: true
 
+# Allow DNS from mgmt VPN clients on any interface; allow DNS from remote VPN client subnets only via wg-mgmt.
+# Security is enforced by source-based UFW allowlist rules in roles/pihole.
+pihole_dns_allowed_sources:
+  - "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}"
+  - "127.0.0.1/32"
+pihole_dns_wireguard_only_sources: >-
+  {{
+    groups['vpn'] | default([])
+    | map('extract', hostvars, 'vpn_nat_subnets')
+    | select('defined')
+    | list
+    | flatten
+  }}
+
 # Restrict Pi-hole Web UI (80/8443) to mgmt VPN clients + localhost.
 pihole_webui_allowed_sources:
   - "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}"
@@ -141,20 +155,6 @@ ufw_extra_rules:
   - { port: 9090, proto: tcp, src: "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}", direction: in }  # Prometheus
   # Loki receives log pushes from nodes over the mgmt WireGuard tunnel
   - { port: 3100, proto: tcp, direction: in, interface: "{{ mgmt_wireguard_interface }}" }  # Loki
-
-# Allow DNS from mgmt VPN clients on any interface; DNS from remote VPN client subnets only via wg-mgmt
-# (the restriction is enforced by Pi-hole UFW rules).
-pihole_dns_allowed_sources:
-  - "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}"
-  - "127.0.0.1/32"
-pihole_dns_wireguard_only_sources: >-
-  {{
-    groups['vpn'] | default([])
-    | map('extract', hostvars, 'vpn_nat_subnets')
-    | select('defined')
-    | list
-    | flatten
-  }}
 # ufw_extra_rules:
 #   - { port: 9090 }   # Prometheus
 #   - { port: 3000 }

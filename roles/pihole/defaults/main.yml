@@ -1,3 +1,8 @@
+# When true, Pi-hole DNS is configured to "permit all origins" (required when
+# VPN client subnets are routed to Pi-hole and are not directly connected).
+# Keep it safe by restricting port 53 via UFW allowlists:
+# - pihole_dns_allowed_sources
+# - pihole_dns_wireguard_only_sources
 pihole_dns_permit_all_origins: false
 pihole_dns_permit_all_origins_conf_path: "/etc/dnsmasq.d/99-ansible-permit-all-origins.conf"
 pihole_dns_allowed_sources: []

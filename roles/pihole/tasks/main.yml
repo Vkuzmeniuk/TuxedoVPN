@@ -88,6 +88,35 @@
   tags: ['pihole']
   become: true
 
+- name: Refresh Pi-hole status (post-install)
+  ansible.builtin.stat:
+    path: /usr/local/bin/pihole
+  register: _pihole_service_check_post
+  changed_when: false
+  tags: ['pihole']
+
+- name: Refresh Pi-hole config file status (post-install)
+  ansible.builtin.stat:
+    path: /etc/pihole/pihole.toml
+  register: _pihole_file_check_post
+  changed_when: false
+  tags: ['pihole']
+
+- name: Compute effective Pi-hole DNS settings
+  ansible.builtin.set_fact:
+    pihole_installed_effective: >-
+      {{
+        (pihole_service_check.stat.exists | default(false))
+        or (_pihole_service_check_post.stat.exists | default(false))
+        or (pihole_file_check.stat.exists | default(false))
+        or (_pihole_file_check_post.stat.exists | default(false))
+      }}
+    pihole_is_v6_effective: "{{ _pihole_file_check_post.stat.exists | default(false) }}"
+    pihole_dnsmasq_listening_mode_effective: "{{ (pihole_dns_permit_all_origins | bool) | ternary('all', 'local') }}"
+    pihole_listening_mode_effective: "{{ (pihole_dns_permit_all_origins | bool) | ternary('ALL', 'LOCAL') }}"
+  changed_when: false
+  tags: ['pihole', 'dns-network']
+
 - name: Ensure Pi-hole admin password is set
   ansible.builtin.command: pihole setpassword "{{ pihole_admin_password }}"
   when:
@@ -98,22 +127,36 @@
   become: true
   tags: ['pihole']
 
-- name: Ensure Pi-hole listens on all interfaces (setupVars.conf)
+- name: Set Pi-hole DNS listening mode (setupVars.conf)
   ansible.builtin.lineinfile:
     path: /etc/pihole/setupVars.conf
-    regexp: '^DNSMASQ_LISTENING='
-    line: 'DNSMASQ_LISTENING=all'
+    regexp: '^\s*DNSMASQ_LISTENING\s*='
+    line: "DNSMASQ_LISTENING={{ pihole_dnsmasq_listening_mode_effective }}"
     create: yes
+  when: pihole_installed_effective | bool
   notify: Restart Pi-hole service
   become: true
   tags: ['pihole', 'dns-network']
 
-- name: Ensure Pi-hole listens on all interfaces (pihole.toml)
+- name: Ensure [dns] section exists in pihole.toml (Pi-hole v6)
   ansible.builtin.lineinfile:
     path: /etc/pihole/pihole.toml
-    regexp: '^listeningMode ='
-    line: 'listeningMode = "ALL"'
-    create: yes
+    line: "[dns]"
+    regexp: '^\s*\[dns\]\s*$'
+    insertbefore: BOF
+    create: true
+  when: pihole_is_v6_effective | bool
+  become: true
+  tags: ['pihole', 'dns-network']
+
+- name: Set Pi-hole DNS listening mode (pihole.toml, Pi-hole v6)
+  ansible.builtin.lineinfile:
+    path: /etc/pihole/pihole.toml
+    regexp: '^\s*listeningMode\s*='
+    line: '  listeningMode = "{{ pihole_listening_mode_effective }}"'
+    insertafter: '^\s*\[dns\]\s*$'
+    create: true
+  when: pihole_is_v6_effective | bool
   notify: Restart Pi-hole service
   become: true
   tags: ['pihole', 'dns-network']
@@ -130,7 +173,9 @@
     owner: root
     group: root
     mode: '0644'
-  when: pihole_dns_permit_all_origins | bool
+  when:
+    - pihole_installed_effective | bool
+    - pihole_dns_permit_all_origins | bool
   notify: Restart Pi-hole service
   become: true
   tags: ['pihole', 'dns-network']
@@ -139,7 +184,9 @@
   ansible.builtin.file:
     path: "{{ pihole_dns_permit_all_origins_conf_path }}"
     state: absent
-  when: not (pihole_dns_permit_all_origins | bool)
+  when:
+    - pihole_installed_effective | bool
+    - not (pihole_dns_permit_all_origins | bool)
   notify: Restart Pi-hole service
   become: true
   tags: ['pihole', 'dns-network']
@@ -369,7 +416,7 @@
     regexp: '^\[misc\]$'
     insertbefore: BOF
     create: true
-  when: pihole_service_check.stat.exists
+  when: pihole_is_v6_effective | bool
   become: true
   tags: ['pihole', 'dns-network']
 
@@ -377,10 +424,10 @@
   ansible.builtin.lineinfile:
     path: /etc/pihole/pihole.toml
     regexp: '^\s*etc_dnsmasq_d\s*='
-    line: 'etc_dnsmasq_d = true'
-    insertafter: '^\[misc\]$'
+    line: '  etc_dnsmasq_d = true'
+    insertafter: '^\s*\[misc\]\s*$'
     create: true
-  when: pihole_service_check.stat.exists
+  when: pihole_is_v6_effective | bool
   notify: Restart Pi-hole service
   become: true
   tags: ['pihole', 'dns-network']
@@ -392,7 +439,7 @@
     owner: root
     group: root
     mode: '0644'
-  when: pihole_service_check.stat.exists
+  when: pihole_is_v6_effective | bool
   notify: Restart Pi-hole service
   become: true
   tags: ['pihole', 'dns-network']
