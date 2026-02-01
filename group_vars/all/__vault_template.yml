@@ -14,12 +14,6 @@ vault_certbot_email: "admin@example.com"
 # Cloudflare DNS-01 (optional convenience):
 # If set, the role can auto-generate /etc/letsencrypt/dns-credentials.ini for you.
 vault_certbot_cloudflare_api_token: ""
-vault_certbot_dns_credentials_ini: |
-  # Example (Cloudflare):
-  # dns_cloudflare_api_token = "change_me"
-  #
-  # Format depends on DNS provider / certbot plugin.
-  # This file will be written to /etc/letsencrypt/dns-credentials.ini with permissions 0600.
-  #
-  # Keep this value in vault.
-  dns_cloudflare_api_token = "change_me"
+# Optional override (advanced): raw credentials file content for /etc/letsencrypt/dns-credentials.ini.
+# Leave empty when using `vault_certbot_cloudflare_api_token` (recommended).
+vault_certbot_dns_credentials_ini: ""
