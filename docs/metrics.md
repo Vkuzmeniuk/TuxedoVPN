@@ -180,6 +180,7 @@ Notes:
 - All `*_octets_*` metrics are bytes (octets). Multiply by `8` only if you need bits/sec.
 - `*_active_*` metrics are snapshots from the latest accounting update for active sessions (not counters). There may be a delay until an interim update or a stop packet.
 - Per-user totals can be limited via `freeradius_accounting_exporter_top_n`. When enabled, the `user` variable will see only top-N users.
+- If `radacct` rows are pruned (cleanup of long-running active sessions) or accounting updates are sparse, per-user totals may decrease. Prefer `delta(...[$__range])` (clamped to 0) for "selected range" panels and enable interim updates for more accurate time slicing.
 - Labels of `tuxedovpn_radacct_user_last_seen_timestamp_seconds` depend on what the NAS sends to FreeRADIUS:
   - `vpn_ip`: `Framed-IP-Address` (usually the assigned VPN client IP)
   - `remote`: `Calling-Station-Id` (often the client's public IP, but depends on NAS)
@@ -197,9 +198,9 @@ PromQL examples (Grafana panels):
 - Top users by current throughput (Bar gauge, unit: bits/sec, query: Instant): `topk(10, 8 * rate(tuxedovpn_radacct_user_total_octets_total{job="$job"}[$__rate_interval]))`
 - Per-user throughput (Time series, unit: bits/sec, filtered): `8 * rate(tuxedovpn_radacct_user_total_octets_total{job="$job",user="$user"}[$__rate_interval])`
 - Usage for selected range (Table, unit: GiB, query: Instant):
-  - Download: `sum by (user) (increase(tuxedovpn_radacct_user_input_octets_total{job="$job"}[$__range])) / 1024 / 1024 / 1024`
-  - Upload: `sum by (user) (increase(tuxedovpn_radacct_user_output_octets_total{job="$job"}[$__range])) / 1024 / 1024 / 1024`
-  - Total: `sum by (user) (increase(tuxedovpn_radacct_user_total_octets_total{job="$job"}[$__range])) / 1024 / 1024 / 1024`
+  - Download: `sum by (user) (clamp_min(delta(tuxedovpn_radacct_user_input_octets_total{job="$job"}[$__range]), 0)) / 1024 / 1024 / 1024`
+  - Upload: `sum by (user) (clamp_min(delta(tuxedovpn_radacct_user_output_octets_total{job="$job"}[$__range]), 0)) / 1024 / 1024 / 1024`
+  - Total: `sum by (user) (clamp_min(delta(tuxedovpn_radacct_user_total_octets_total{job="$job"}[$__range]), 0)) / 1024 / 1024 / 1024`
 - Active users right now (Table, unit: none, query: Instant, format: Table): `sort_desc(tuxedovpn_radacct_user_active_sessions{job="$job"})`
 
 ### RADIUS → Pi-hole sync metrics

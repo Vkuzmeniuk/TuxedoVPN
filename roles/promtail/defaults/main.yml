@@ -19,5 +19,10 @@ promtail_ocserv_log_path: >-
     | default(private_vpn_log_file | default('/var/log/ocserv.log'))
   }}
 
+# Fail2Ban (optional)
+promtail_fail2ban_enable: "{{ common_fail2ban_enable | default(false) | bool }}"
+promtail_manage_fail2ban_log_permissions: true
+promtail_fail2ban_log_path: "/var/log/fail2ban.log"
+
 # Suricata EVE is high-volume; keep disabled by default.
 promtail_suricata_eve_enable: false

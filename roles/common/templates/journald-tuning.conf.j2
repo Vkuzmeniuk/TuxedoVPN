@@ -1,0 +1,5 @@
+# Managed by Ansible (role: common)
+[Journal]
+{% for item in (common_journald_settings | default({}) | dictsort) %}
+{{ item.0 }}={{ item.1 }}
+{% endfor %}

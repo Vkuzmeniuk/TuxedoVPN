@@ -30,12 +30,12 @@
   ansible.builtin.assert:
     that:
       - (mgmt_wireguard_address_mgmt | default('') | trim) | length > 0
-      - (mgmt_wireguard_address_mgmt | default('')) is search('/\\d+$')
+      - (mgmt_wireguard_address_mgmt | default('') | trim) is search('/\\d+$')
     fail_msg: "mgmt_wireguard_address_mgmt must be set to an address with a CIDR prefix (e.g. 10.202.0.1/24)."
 
 - name: Derive WireGuard network helpers
   ansible.builtin.set_fact:
-    mgmt_wireguard_network_prefix_length: "{{ (mgmt_wireguard_address_mgmt.split('/') | last) | int }}"
+    mgmt_wireguard_network_prefix_length: "{{ ((mgmt_wireguard_address_mgmt | string | trim).split('/') | last) | int }}"
     mgmt_wireguard_mgmt_ip: "{{ (mgmt_wireguard_address_mgmt | regex_replace('/.*$', '')) | trim }}"
     mgmt_wireguard_ipv4_base_prefix: "{{ (mgmt_wireguard_address_mgmt | regex_replace('/.*$', '') | regex_replace('\\.\\d+$', '.')) | trim }}"
   changed_when: false
@@ -43,7 +43,7 @@
 - name: Validate auto assignment prerequisites
   ansible.builtin.assert:
     that:
-      - mgmt_wireguard_network_prefix_length == 24
+      - (mgmt_wireguard_network_prefix_length | int) == 24
       - (mgmt_wireguard_ipv4_base_prefix | default('')) is search('^\\d+\\.\\d+\\.\\d+\\.$')
     fail_msg: >-
       Auto-assigned VPN WireGuard addresses require `mgmt_wireguard_address_mgmt` to be an IPv4 /24

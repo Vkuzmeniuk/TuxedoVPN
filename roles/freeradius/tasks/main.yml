@@ -932,6 +932,7 @@
   register: freeradius_manage_nas_sync
   when: (freeradius_nas_clients_render | default([])) | length > 0
   changed_when: (freeradius_manage_nas_sync.rc == 0) and (freeradius_manage_nas_sync.stdout is search('NAS_SYNC=1'))
+  notify: Restart FreeRADIUS
   failed_when: false
   no_log: true
 

@@ -1,0 +1,11 @@
+# Managed by Ansible (role: dpi)
+{{ dpi_suricata_logrotate_paths | join(' ') }} {
+  {{ dpi_suricata_logrotate_frequency }}
+  rotate {{ dpi_suricata_logrotate_rotate | int }}
+  size {{ dpi_suricata_logrotate_size }}
+  {% if dpi_suricata_logrotate_missingok | bool %}missingok{% endif %}
+  {% if dpi_suricata_logrotate_notifempty | bool %}notifempty{% endif %}
+  {% if dpi_suricata_logrotate_compress | bool %}compress{% endif %}
+  {% if dpi_suricata_logrotate_delaycompress | bool %}delaycompress{% endif %}
+  {% if dpi_suricata_logrotate_copytruncate | bool %}copytruncate{% endif %}
+}

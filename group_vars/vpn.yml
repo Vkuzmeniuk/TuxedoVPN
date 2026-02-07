@@ -1,6 +1,14 @@
 ssh_port: 22
+common_journald_tuning_enable: true
+common_journald_settings:
+  Compress: "yes"
+  SystemMaxUse: "256M"
+  RuntimeMaxUse: "64M"
+  MaxRetentionSec: "7day"
+common_set_hostname_from_inventory: true
 ufw_extra_rules:
   - { port: 443 }
+  - { port: 443, proto: udp }  # DTLS (improves VPN throughput vs TCP-only)
   - { port: 1812, proto: udp, direction: out, dest: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
   - { port: 1813, proto: udp, direction: out, dest: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }
   - { port: 53,   proto: udp, direction: out, dest: "{{ mgmt_wireguard_mgmt_ip }}", interface: "{{ mgmt_wireguard_interface }}" }

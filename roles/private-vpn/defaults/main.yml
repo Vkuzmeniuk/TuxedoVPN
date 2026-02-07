@@ -7,5 +7,6 @@ vpn_dns_servers:
   - "8.8.8.8"
   - "1.1.1.1"
 common_vpn_exporter_static_labels:
+  nodename: "{{ ansible_nodename | default(ansible_hostname) | default(inventory_hostname) }}"
   vpn_role: "private"
 common_vpn_template_src: "{{ playbook_dir }}/roles/private-vpn/templates/ocserv.conf.j2"

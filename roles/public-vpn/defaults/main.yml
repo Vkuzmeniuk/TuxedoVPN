@@ -8,6 +8,7 @@ public_vpn_camouflage_realm: "Restricted Content"
 vpn_camouflage_enabled: true
 vpn_stats_report_time: 300
 common_vpn_exporter_static_labels:
+  nodename: "{{ ansible_nodename | default(ansible_hostname) | default(inventory_hostname) }}"
   vpn_role: "public"
 common_vpn_template_src: "{{ playbook_dir }}/roles/public-vpn/templates/ocserv.conf.j2"
 vpn_nat_subnets:

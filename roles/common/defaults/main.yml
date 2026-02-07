@@ -8,6 +8,22 @@ common_fail2ban_sshd_mode: "aggressive" # normal | ddos | extra | aggressive
 # when DNS is not configured yet).
 common_ensure_hostname_resolves: true
 
+# Hostname management
+# - Set common_set_hostname_from_inventory=true to apply inventory hostnames.
+# - Or provide common_hostname explicitly per host/group.
+common_set_hostname_from_inventory: false
+common_hostname: ""
+
 # Manage admin_user password to allow SSH password logins.
 admin_user_manage_password: false
 admin_user_password_plain: ""
+
+# Journald retention tuning (optional; enabled per-group/host).
+common_journald_tuning_enable: false
+common_journald_conf_dir: "/etc/systemd/journald.conf.d"
+common_journald_conf_file: "99-tuxedovpn.conf"
+common_journald_settings:
+  Compress: "yes"
+  SystemMaxUse: "256M"
+  RuntimeMaxUse: "64M"
+  MaxRetentionSec: "7day"

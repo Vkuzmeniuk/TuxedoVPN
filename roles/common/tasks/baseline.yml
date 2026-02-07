@@ -3,10 +3,41 @@
   community.general.timezone:
     name: "{{ timezone }}"
 
+- name: Normalize hostname override
+  ansible.builtin.set_fact:
+    common_hostname_override: "{{ common_hostname | default('') | trim }}"
+  changed_when: false
+
+- name: Determine effective hostname settings
+  ansible.builtin.set_fact:
+    common_hostname_effective: >-
+      {{
+        common_hostname_override
+        if (common_hostname_override | length) > 0
+        else (inventory_hostname if (common_set_hostname_from_inventory | default(false) | bool) else '')
+      }}
+    common_hostname_resolve_name: >-
+      {{
+        common_hostname_override
+        if (common_hostname_override | length) > 0
+        else (
+          inventory_hostname
+          if (common_set_hostname_from_inventory | default(false) | bool)
+          else (ansible_facts.hostname | default(ansible_hostname) | default(inventory_hostname))
+        )
+      }}
+  changed_when: false
+
+- name: Set system hostname
+  ansible.builtin.hostname:
+    name: "{{ common_hostname_effective }}"
+  when: (common_hostname_effective | default('') | trim | length) > 0
+
 - name: Ensure hostname resolves locally
   ansible.builtin.lineinfile:
     path: /etc/hosts
-    line: "127.0.1.1 {{ ansible_facts.hostname }} {{ ansible_facts.hostname }}.localdomain"
+    regexp: '^127\\.0\\.1\\.1\\s+'
+    line: "127.0.1.1 {{ common_hostname_resolve_name }} {{ common_hostname_resolve_name }}.localdomain"
     state: present
   when: common_ensure_hostname_resolves | default(true) | bool
 

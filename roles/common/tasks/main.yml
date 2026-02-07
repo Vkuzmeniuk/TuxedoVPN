@@ -1,6 +1,7 @@
 ---
 - import_tasks: apt_wait.yml
 - import_tasks: baseline.yml
+- import_tasks: journald.yml
 - import_tasks: ssh.yml
 - import_tasks: fail2ban.yml
 - import_tasks: updates.yml

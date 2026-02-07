@@ -125,6 +125,17 @@
     mode: "0640"
   when: promtail_manage_ocserv_log_permissions | default(true) | bool
 
+- name: Ensure Fail2Ban log file exists and is readable (optional)
+  ansible.builtin.file:
+    path: "{{ promtail_fail2ban_log_path }}"
+    state: touch
+    owner: root
+    group: adm
+    mode: "0640"
+  when:
+    - promtail_fail2ban_enable | default(false) | bool
+    - promtail_manage_fail2ban_log_permissions | default(true) | bool
+
 - name: Render /etc/promtail/config.yml
   ansible.builtin.template:
     src: config.yml.j2

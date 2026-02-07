@@ -16,6 +16,7 @@ Focus on logs that are high-signal for VPN operations and incident response:
 - **Reverse proxy** (`/var/log/nginx/*.log`): access to Grafana/Prometheus/Pi-hole via the mgmt VPN
 - **System logs** (`/var/log/syslog`, `/var/log/auth.log`): SSH and base OS events
 - **Project services** (journal): `tuxedovpn-dpi-blocker.service`, `tuxedovpn-radius-pihole-sync.service`
+- **Fail2Ban** (`/var/log/fail2ban.log`): SSH/ocserv bans and other jail activity
 
 ## Deployment model
 
@@ -57,6 +58,7 @@ ansible-playbook site.yml -t promtail -J
 ## Notes / tuning knobs
 
 - Loki retention defaults to **7 days** (`loki_retention_period: 168h`).
+- Fail2Ban logs are shipped from `/var/log/fail2ban.log` when `promtail_fail2ban_enable: true` (defaults to `common_fail2ban_enable`).
 - Suricata `eve.json` is disabled by default. To enable on vpn nodes:
 
 ```yaml
@@ -71,4 +73,5 @@ promtail_suricata_eve_enable: true
   - `{job="journal",unit="tuxedovpn-dpi-agent.service"}`
 - FreeRADIUS rejects:
   - `{job="freeradius"} |= "Reject"`
-
+- Fail2Ban bans:
+  - `{job="fail2ban"} |= " Ban "`

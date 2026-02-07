@@ -153,6 +153,15 @@
     validate: "{{ '/usr/bin/suricata -T -c %s' if (dpi_suricata_validate_config | default(true) | bool) else omit }}"
   notify: Restart tuxedovpn Suricata (NFQUEUE)
 
+- name: Install logrotate rule for Suricata logs
+  ansible.builtin.template:
+    src: logrotate-suricata.j2
+    dest: /etc/logrotate.d/suricata
+    owner: root
+    group: root
+    mode: "0644"
+  when: dpi_suricata_logrotate_enable | default(true) | bool
+
 - name: Install tuxedovpn Suricata systemd unit (NFQUEUE capture)
   ansible.builtin.template:
     src: tuxedovpn-suricata.service.j2

@@ -12,6 +12,12 @@
   "__elements": {},
   "__requires": [
     {
+      "type": "panel",
+      "id": "gauge",
+      "name": "Gauge",
+      "version": ""
+    },
+    {
       "type": "grafana",
       "id": "grafana",
       "name": "Grafana",
@@ -93,17 +99,17 @@
               }
             ]
           },
-          "unit": "s"
+          "unit": "dateTimeAsLocal"
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
-        "w": 5,
+        "h": 5,
+        "w": 7,
         "x": 0,
         "y": 1
       },
-      "id": 1,
+      "id": 5,
       "options": {
         "colorMode": "value",
         "graphMode": "none",
@@ -124,19 +130,82 @@
       "pluginVersion": "12.3.1",
       "targets": [
         {
-          "editorMode": "builder",
-          "expr": "tuxedovpn_dpi_uptime_seconds{nodename=\"$nodename\"}",
-          "legendFormat": "__auto",
-          "range": true,
-          "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
-          }
+          },
+          "editorMode": "code",
+          "expr": "tuxedovpn_dpi_last_event_timestamp_seconds{nodename=~\"$nodename\"} * 1000",
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "DPI Last Event ${nodename}",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 17,
+        "x": 7,
+        "y": 1
+      },
+      "id": 1,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "12.3.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "tuxedovpn_dpi_uptime_seconds{nodename=~\"$nodename\"}",
+          "legendFormat": "{{nodename}}",
+          "range": true,
+          "refId": "A"
         }
       ],
       "title": "DPI Uptime ${nodename}",
-      "type": "stat"
+      "type": "gauge"
     },
     {
       "datasource": {
@@ -199,10 +268,10 @@
         ]
       },
       "gridPos": {
-        "h": 8,
-        "w": 19,
-        "x": 5,
-        "y": 1
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 6
       },
       "id": 4,
       "options": {
@@ -224,7 +293,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "label_join(\r\n  max by (nodename, user, reason) (\r\n    max_over_time(\r\n      (increase(tuxedovpn_dpi_events_total{stage=\"detect\", result=\"match\"}[5m]) > bool 0)[30m:1m]\r\n    )\r\n  ),\r\n  \"join_key\", \"|\", \"nodename\", \"user\", \"reason\"\r\n)\r\n",
+          "expr": "label_join(\r\n  max by (nodename, user, reason) (\r\n    max_over_time(\r\n      (increase(tuxedovpn_dpi_events_total{stage=\"detect\", result=\"match\", nodename=~\"$nodename\"}[5m]) > bool 0)[30m:1m]\r\n    )\r\n  ),\r\n  \"join_key\", \"|\", \"nodename\", \"user\", \"reason\"\r\n)\r\n",
           "hide": false,
           "instant": false,
           "legendFormat": "match_detect",
@@ -237,7 +306,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "label_join(\r\n  max by (nodename, user, reason) (\r\n    max_over_time(\r\n      (increase(tuxedovpn_dpi_events_total{stage=\"disconnect\",result=\"success\"}[5m]) > bool 0)[30m:1m]\r\n    )\r\n  ),\r\n  \"join_key\", \"|\", \"nodename\", \"user\", \"reason\"\r\n)",
+          "expr": "label_join(\r\n  max by (nodename, user, reason) (\r\n    max_over_time(\r\n      (increase(tuxedovpn_dpi_events_total{stage=\"disconnect\",result=\"success\", nodename=~\"$nodename\"}[5m]) > bool 0)[30m:1m]\r\n    )\r\n  ),\r\n  \"join_key\", \"|\", \"nodename\", \"user\", \"reason\"\r\n)",
           "hide": false,
           "instant": false,
           "legendFormat": "success_disconnect",
@@ -250,7 +319,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "label_join(\r\n  max by (nodename, user, reason) (\r\n    max_over_time(\r\n      (increase(tuxedovpn_dpi_events_total{stage=\"webhook\", result=\"success\"}[5m]) > bool 0)[30m:1m]\r\n    )\r\n  ),\r\n  \"join_key\", \"|\", \"nodename\", \"user\", \"reason\"\r\n)\r\n",
+          "expr": "label_join(\r\n  max by (nodename, user, reason) (\r\n    max_over_time(\r\n      (increase(tuxedovpn_dpi_events_total{stage=\"webhook\", result=\"success\", nodename=~\"$nodename\"}[5m]) > bool 0)[30m:1m]\r\n    )\r\n  ),\r\n  \"join_key\", \"|\", \"nodename\", \"user\", \"reason\"\r\n)\r\n",
           "hide": false,
           "instant": false,
           "legendFormat": "success_webhook",
@@ -258,7 +327,7 @@
           "refId": "C"
         }
       ],
-      "title": "tuxedovpn_dpi_events_total",
+      "title": "tuxedovpn_dpi_events_total $nodename",
       "transformations": [
         {
           "id": "timeSeriesTable",
@@ -335,71 +404,6 @@
         }
       ],
       "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "dateTimeAsLocal"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 5,
-        "x": 0,
-        "y": 5
-      },
-      "id": 5,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "auto",
-        "percentChangeColorMode": "same_as_value",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "value",
-        "wideLayout": true
-      },
-      "pluginVersion": "12.3.1",
-      "targets": [
-        {
-          "editorMode": "builder",
-          "expr": "tuxedovpn_dpi_last_event_timestamp_seconds{nodename=\"$nodename\"} * 1000",
-          "legendFormat": "__auto",
-          "range": true,
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ],
-      "title": "DPI Last Event ${nodename}",
-      "type": "stat"
     }
   ],
   "preload": false,
@@ -417,6 +421,7 @@
           "uid": "${DS_PROMETHEUS}"
         },
         "definition": "",
+        "hide": 2,
         "includeAll": false,
         "label": "Job",
         "name": "job",
@@ -431,55 +436,39 @@
         "type": "query"
       },
       {
+        "allValue": ".*",
+        "allowCustomValue": false,
         "current": {},
         "datasource": {
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
         },
-        "definition": "label_values(node_uname_info{job=\"$job\"}, nodename)",
-        "includeAll": false,
+        "definition": "query_result(max by (nodename) (  max_over_time(tuxedovpn_dpi_uptime_seconds{job=\"dpi_agent_vpn\"}[15m])))",
+        "includeAll": true,
         "label": "Nodename",
+        "multi": true,
         "name": "nodename",
         "options": [],
         "query": {
-          "query": "label_values(node_uname_info{job=\"$job\"}, nodename)",
-          "refId": "Prometheus-nodename-Variable-Query"
+          "qryType": 3,
+          "query": "query_result(max by (nodename) (  max_over_time(tuxedovpn_dpi_uptime_seconds{job=\"dpi_agent_vpn\"}[15m])))",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
-        "regex": "",
-        "sort": 1,
-        "type": "query"
-      },
-      {
-        "current": {},
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${DS_PROMETHEUS}"
-        },
-        "definition": "label_values(node_uname_info{job=\"$job\", nodename=\"$nodename\"}, instance)",
-        "includeAll": false,
-        "label": "Instance",
-        "name": "node",
-        "options": [],
-        "query": {
-          "query": "label_values(node_uname_info{job=\"$job\", nodename=\"$nodename\"}, instance)",
-          "refId": "Prometheus-node-Variable-Query"
-        },
-        "refresh": 1,
-        "regex": "",
+        "regex": "/nodename=\"([^\"]+)\"/",
         "sort": 1,
         "type": "query"
       }
     ]
   },
   "time": {
-    "from": "now-24h",
+    "from": "now-12h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "DPI",
   "uid": "rYdddlPWk1",
-  "version": 31,
+  "version": 12,
   "weekStart": ""
 }

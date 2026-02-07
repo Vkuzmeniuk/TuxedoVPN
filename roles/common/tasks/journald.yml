@@ -1,0 +1,17 @@
+---
+- name: Ensure journald drop-in directory exists
+  ansible.builtin.file:
+    path: "{{ common_journald_conf_dir }}"
+    state: directory
+    mode: "0755"
+  when: common_journald_tuning_enable | default(false) | bool
+
+- name: Install journald retention tuning
+  ansible.builtin.template:
+    src: journald-tuning.conf.j2
+    dest: "{{ common_journald_conf_dir }}/{{ common_journald_conf_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: common_journald_tuning_enable | default(false) | bool
+  notify: Restart journald

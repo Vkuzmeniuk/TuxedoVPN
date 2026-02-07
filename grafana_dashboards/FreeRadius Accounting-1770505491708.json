@@ -7,6 +7,20 @@
       "type": "datasource",
       "pluginId": "prometheus",
       "pluginName": "Prometheus"
+    },
+    {
+      "name": "VAR_ACCT_INTERVAL",
+      "type": "constant",
+      "label": "Acct interval",
+      "value": "60s",
+      "description": ""
+    },
+    {
+      "name": "VAR_ACCT_INTERVAL_S",
+      "type": "constant",
+      "label": "Acct interval (s)",
+      "value": "60",
+      "description": ""
     }
   ],
   "__elements": {},
@@ -63,7 +77,6 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": null,
   "links": [],
   "panels": [
     {
@@ -133,106 +146,20 @@
       "pluginVersion": "12.3.1",
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "editorMode": "code",
           "expr": "max(tuxedovpn_freeradius_accounting_exporter_scrape_success{job=\"$job\"})",
           "instant": false,
           "legendFormat": "__auto",
           "range": true,
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
+          "refId": "A"
         }
       ],
       "title": "Exporter health",
       "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "footer": {
-              "reducers": []
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 5,
-        "x": 4,
-        "y": 1
-      },
-      "id": 4,
-      "options": {
-        "cellHeight": "sm",
-        "frameIndex": 0,
-        "showHeader": true
-      },
-      "pluginVersion": "12.3.1",
-      "targets": [
-        {
-          "editorMode": "code",
-          "exemplar": false,
-          "expr": "sum by (user) (\r\n  tuxedovpn_radacct_user_active_sessions{job=\"$job\"}\r\n)",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "{{user}}",
-          "range": false,
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ],
-      "title": "Active users right now",
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true
-            },
-            "includeByName": {},
-            "indexByName": {},
-            "renameByName": {
-              "Time": "",
-              "Value": "Active Sessions",
-              "user": "Username"
-            }
-          }
-        }
-      ],
-      "type": "table"
     },
     {
       "datasource": {
@@ -298,8 +225,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 15,
-        "x": 9,
+        "w": 20,
+        "x": 4,
         "y": 1
       },
       "id": 13,
@@ -311,6 +238,10 @@
       "pluginVersion": "12.3.1",
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "editorMode": "code",
           "exemplar": false,
           "expr": "tuxedovpn_radacct_user_last_seen_timestamp_seconds{job=\"$job\"}",
@@ -318,11 +249,7 @@
           "instant": true,
           "legendFormat": "{{user}}",
           "range": false,
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
+          "refId": "A"
         }
       ],
       "title": "Users last seen",
@@ -455,15 +382,15 @@
       "pluginVersion": "12.3.1",
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "editorMode": "code",
           "expr": "tuxedovpn_radacct_active_sessions{job=\"$job\"}",
           "legendFormat": "__auto",
           "range": true,
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
+          "refId": "A"
         }
       ],
       "title": "Active sessions",
@@ -528,21 +455,107 @@
       "pluginVersion": "12.3.1",
       "targets": [
         {
-          "editorMode": "code",
-          "exemplar": false,
-          "expr": "sum by (user) (increase(tuxedovpn_radacct_user_total_octets_total{job=\"$job\"}[$__range])) / 1024 / 1024 / 1024",
-          "instant": true,
-          "legendFormat": "{{user}}",
-          "range": false,
-          "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
-          }
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "sort_desc(\r\n  sum by (user) (clamp_min(delta(tuxedovpn_radacct_user_total_octets_total{job=\"$job\"}[$__range]), 0))\r\n) / 1024 / 1024 / 1024",
+          "instant": true,
+          "legendFormat": "{{user}}",
+          "range": false,
+          "refId": "A"
         }
       ],
       "title": "Total for selected range",
       "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "footer": {
+              "reducers": []
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 14,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "id": 4,
+      "options": {
+        "cellHeight": "sm",
+        "frameIndex": 0,
+        "showHeader": true
+      },
+      "pluginVersion": "12.3.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "sum by (user) (\r\n  tuxedovpn_radacct_user_active_sessions{job=\"$job\"}\r\n)",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{user}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Active users right now",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "includeByName": {},
+            "indexByName": {},
+            "renameByName": {
+              "Time": "",
+              "Value": "Active Sessions",
+              "user": "Username"
+            }
+          }
+        }
+      ],
+      "type": "table"
     },
     {
       "datasource": {
@@ -573,12 +586,12 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 16,
         "w": 12,
-        "x": 12,
-        "y": 9
+        "x": 0,
+        "y": 23
       },
-      "id": 8,
+      "id": 9,
       "options": {
         "displayMode": "gradient",
         "legend": {
@@ -606,17 +619,17 @@
       "pluginVersion": "12.3.1",
       "targets": [
         {
-          "editorMode": "code",
-          "exemplar": false,
-          "expr": "sum by (user) (increase(tuxedovpn_radacct_user_output_octets_total{job=\"$job\"}[$__range])) / 1024 / 1024 / 1024",
-          "instant": true,
-          "legendFormat": "{{user}}",
-          "range": false,
-          "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
-          }
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "sort_desc(\r\n  sum by (user) (clamp_min(delta(tuxedovpn_radacct_user_output_octets_total{job=\"$job\"}[$__range]), 0))\r\n) / 1024 / 1024 / 1024\r\n",
+          "instant": true,
+          "legendFormat": "{{user}}",
+          "range": false,
+          "refId": "A"
         }
       ],
       "title": "Download for selected range",
@@ -651,12 +664,12 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 16,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 23
       },
-      "id": 9,
+      "id": 8,
       "options": {
         "displayMode": "gradient",
         "legend": {
@@ -684,17 +697,17 @@
       "pluginVersion": "12.3.1",
       "targets": [
         {
-          "editorMode": "code",
-          "exemplar": false,
-          "expr": "sum by (user) (increase(tuxedovpn_radacct_user_input_octets_total{job=\"$job\"}[$__range])) / 1024 / 1024 / 1024",
-          "instant": true,
-          "legendFormat": "{{user}}",
-          "range": false,
-          "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
-          }
+          },
+          "editorMode": "code",
+          "exemplar": false,
+          "expr": "sort_desc(\r\n  sum by (user) (clamp_min(delta(tuxedovpn_radacct_user_input_octets_total{job=\"$job\"}[$__range]), 0))\r\n) / 1024 / 1024 / 1024",
+          "instant": true,
+          "legendFormat": "{{user}}",
+          "range": false,
+          "refId": "A"
         }
       ],
       "title": "Upload for selected range",
@@ -729,10 +742,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 5,
+        "h": 10,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 39
       },
       "id": 3,
       "options": {
@@ -762,15 +775,15 @@
       "pluginVersion": "12.3.1",
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "editorMode": "code",
           "expr": "topk(10, 8 * rate(tuxedovpn_radacct_user_total_octets_total{job=\"$job\"}[$__rate_interval]))",
           "legendFormat": "{{user}}",
           "range": true,
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
+          "refId": "A"
         }
       ],
       "title": "Top users by current throughput",
@@ -782,7 +795,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 49
       },
       "id": 12,
       "panels": [],
@@ -855,7 +868,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 29
+        "y": 50
       },
       "id": 6,
       "options": {
@@ -874,15 +887,16 @@
       "pluginVersion": "12.3.1",
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "8 * rate(tuxedovpn_radacct_input_octets_total{job=\"$job\"}[$__rate_interval])",
-          "legendFormat": "Upload",
-          "range": true,
-          "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
-          }
+          },
+          "editorMode": "code",
+          "expr": "8 * increase(tuxedovpn_radacct_input_octets_total{job=\"$job\"}[$acct_interval]) / $acct_interval_s",
+          "interval": "60s",
+          "legendFormat": "Upload",
+          "range": true,
+          "refId": "A"
         },
         {
           "datasource": {
@@ -890,9 +904,10 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "8 * rate(tuxedovpn_radacct_output_octets_total{job=\"$job\"}[$__rate_interval])",
+          "expr": "8 * increase(tuxedovpn_radacct_output_octets_total{job=\"$job\"}[$acct_interval]) / $acct_interval_s",
           "hide": false,
           "instant": false,
+          "interval": "60s",
           "legendFormat": "Download",
           "range": true,
           "refId": "B"
@@ -963,7 +978,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 60
       },
       "id": 5,
       "options": {
@@ -982,117 +997,19 @@
       "pluginVersion": "12.3.1",
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "8 * rate(tuxedovpn_radacct_total_octets_total{job=\"$job\"}[$__rate_interval])",
-          "legendFormat": "Total",
-          "range": true,
-          "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
-          }
+          },
+          "editorMode": "code",
+          "expr": "8 * increase(tuxedovpn_radacct_total_octets_total{job=\"$job\"}[$acct_interval]) / $acct_interval_s",
+          "interval": "60s",
+          "legendFormat": "Total",
+          "range": true,
+          "refId": "A"
         }
       ],
       "title": "Total throughput",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "bps"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 24,
-        "x": 0,
-        "y": 48
-      },
-      "id": 7,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "12.3.1",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "rate(tuxedovpn_radacct_user_total_octets_total{job=\"$job\",user=\"$user\"}[$__rate_interval])",
-          "legendFormat": "{{user}}",
-          "range": true,
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
-        }
-      ],
-      "title": "Per-user throughput - $user",
       "type": "timeseries"
     }
   ],
@@ -1119,54 +1036,67 @@
         "type": "query"
       },
       {
-        "current": {},
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${DS_PROMETHEUS}"
+        "hide": 2,
+        "label": "Acct interval",
+        "name": "acct_interval",
+        "query": "${VAR_ACCT_INTERVAL}",
+        "skipUrlSync": true,
+        "type": "constant",
+        "current": {
+          "value": "${VAR_ACCT_INTERVAL}",
+          "text": "${VAR_ACCT_INTERVAL}",
+          "selected": false
         },
-        "definition": "label_values(tuxedovpn_radacct_user_total_octets_total{job=\"$job\"}, user)",
-        "label": "User",
-        "name": "user",
-        "options": [],
-        "query": {
-          "qryType": 4,
-          "query": "label_values(tuxedovpn_radacct_user_total_octets_total{job=\"$job\"}, user)",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "refresh": 1,
-        "regex": "",
-        "type": "query"
+        "options": [
+          {
+            "value": "${VAR_ACCT_INTERVAL}",
+            "text": "${VAR_ACCT_INTERVAL}",
+            "selected": false
+          }
+        ]
       },
       {
-        "current": {},
+        "description": "",
+        "hide": 2,
+        "label": "Acct interval (s)",
+        "name": "acct_interval_s",
+        "query": "${VAR_ACCT_INTERVAL_S}",
+        "skipUrlSync": true,
+        "type": "constant",
+        "current": {
+          "value": "${VAR_ACCT_INTERVAL_S}",
+          "text": "${VAR_ACCT_INTERVAL_S}",
+          "selected": false
+        },
+        "options": [
+          {
+            "value": "${VAR_ACCT_INTERVAL_S}",
+            "text": "${VAR_ACCT_INTERVAL_S}",
+            "selected": false
+          }
+        ]
+      },
+      {
+        "baseFilters": [],
         "datasource": {
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
         },
-        "definition": "label_values(tuxedovpn_radacct_user_total_octets_by_nas_total{job=\"$job\",nas!=\"\"}, nas)",
-        "hide": 2,
-        "label": "Nas",
-        "name": "nas",
-        "options": [],
-        "query": {
-          "qryType": 4,
-          "query": "label_values(tuxedovpn_radacct_user_total_octets_by_nas_total{job=\"$job\",nas!=\"\"}, nas)",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "refresh": 1,
-        "regex": "",
-        "type": "query"
+        "filters": [],
+        "name": "Filters",
+        "type": "adhoc"
       }
     ]
   },
   "time": {
-    "from": "now-6h",
+    "from": "now-12h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "FreeRadius Accounting",
   "uid": "adhkqrl",
-  "version": 56,
-  "weekStart": ""
+  "version": 12,
+  "weekStart": "",
+  "id": null
 }

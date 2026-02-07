@@ -110,3 +110,20 @@ dpi_mgmt_webhook_token_path: "/etc/tuxedovpn/dpi-webhook.token"
 
 # Path to occtl (ocserv control tool).
 dpi_occtl_path: "/usr/bin/occtl"
+
+# Logrotate for Suricata logs (prevents large eve.json/fast.log growth).
+dpi_suricata_log_dir: "/var/log/suricata"
+dpi_suricata_logrotate_enable: true
+dpi_suricata_logrotate_paths:
+  - "{{ dpi_suricata_log_dir }}/fast.log"
+  - "{{ dpi_suricata_log_dir }}/eve.json"
+  - "{{ dpi_suricata_log_dir }}/suricata.log"
+  - "{{ dpi_suricata_log_dir }}/stats.log"
+dpi_suricata_logrotate_frequency: "daily"
+dpi_suricata_logrotate_rotate: 7
+dpi_suricata_logrotate_size: "200M"
+dpi_suricata_logrotate_compress: true
+dpi_suricata_logrotate_delaycompress: true
+dpi_suricata_logrotate_missingok: true
+dpi_suricata_logrotate_notifempty: true
+dpi_suricata_logrotate_copytruncate: true

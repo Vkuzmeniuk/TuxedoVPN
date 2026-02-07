@@ -76,53 +76,10 @@ outputs:
 
       types:
         - alert:
-
             tagged-packets: yes
-        - frame:
-            enabled: no
-        - anomaly:
-            enabled: yes
-            types:
-        - http:
-            extended: yes
-        - dns:
-
-
-
-
-
-        - tls:
-            extended: yes
-        - files:
-            force-magic: no
-        - smtp:
-
-        - ftp
-        - rdp
-        - nfs
-        - smb
-        - tftp
-        - ike
-        - dcerpc
-        - krb5
+        - drop:
+            alerts: yes
         - bittorrent-dht
-        - snmp
-        - rfb
-        - sip
-        - quic
-        - dhcp:
-            enabled: yes
-            extended: no
-        - ssh
-        - mqtt:
-        - http2
-        - pgsql:
-            enabled: no
-        - stats:
-            totals: yes
-            threads: no
-            deltas: no
-        - flow
 
 
 

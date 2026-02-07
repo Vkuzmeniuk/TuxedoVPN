@@ -147,6 +147,7 @@ mgmt_reverse_proxy_tls_mode: "{{ tuxedovpn_tls_mode | default('selfsigned') }}"
 ssh_port: 22
 ufw_extra_rules:
   - { port: 443 }
+  - { port: 443, proto: udp }  # DTLS (improves VPN throughput vs TCP-only)
   # Allow web consoles/observability only from VPN clients
   - { port: 80,   proto: tcp, src: "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}", direction: in }
   - { port: 443,  proto: tcp, src: "{{ vpn_ipv4_network }}/{{ vpn_ipv4_prefix_length }}", direction: in }
@@ -163,7 +164,7 @@ freeradius_default_simultaneous_use: 2
 freeradius_enable_simultaneous_use: true
 freeradius_enable_daily_quota: false
 freeradius_enable_blocklist: true
-freeradius_acct_interim_interval: 60
+freeradius_acct_interim_interval: 300
 freeradius_accounting_exporter_enable: true
 freeradius_accounting_exporter_listen_ip: "127.0.0.1"
 freeradius_accounting_exporter_listen_port: 9814
@@ -193,12 +194,12 @@ freeradius_admin_only_nas_shortnames: ["localhost"]
 # - user1: default access (public VPN only)
 freeradius_user_group_assignments:
   - { username: "{{ vpn_default_user_name }}", groupname: "admins", priority: 0 }
-  - { username: "user1", groupname: "default", priority: 0 }
+  # - { username: "user1", groupname: "default", priority: 0 }
 
 # Ensure extra VPN users exist in the RADIUS DB (radcheck).
-freeradius_extra_users:
-  - username: "user1"
-    password: "{{ vault_vpn_user1_password | default('') }}"
+# freeradius_extra_users:
+#  - username: "user1"
+#    password: "{{ vault_vpn_user1_password | default('') }}"
 
 # Sync RADIUS (radusergroup/radacct) to Pi-hole group assignments (gravity.db).
 radius_pihole_sync_enable: true
