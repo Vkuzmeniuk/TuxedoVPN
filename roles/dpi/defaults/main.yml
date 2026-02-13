@@ -60,7 +60,9 @@ dpi_agent_metrics_path: "/metrics"
 # - ruleset: match by `alert.signature_id` (SID) if it exists in `dpi_agent_ruleset_path` (recommended)
 # - regex: match by `alert.signature` text via `dpi_agent_signature_match_regex`
 # - both: either ruleset match or regex match
-dpi_agent_match_mode: "ruleset"
+#
+# NOTE: "both" improves resilience when rules are updated or signatures differ.
+dpi_agent_match_mode: "both"
 
 # Path to the rules file deployed to VPN nodes.
 dpi_agent_ruleset_path: "{{ dpi_suricata_rule_dest }}"
@@ -102,6 +104,9 @@ dpi_agent_enforce_min_interval_seconds: 5
 # When username can't be resolved immediately, keep a short IP-based correlation window (seconds).
 # This is only needed to bridge the gap until we can map vpn_ip -> username (after that we switch to user-based blocks).
 dpi_agent_ip_correlation_seconds: 120
+
+# OCCTL session cache TTL (seconds). Lower values reduce username resolution delay on DPI hits.
+dpi_agent_occtl_cache_seconds: 1
 
 # Optional: send events to the mgmt webhook for centralized blocking + Telegram.
 dpi_mgmt_webhook_url: ""

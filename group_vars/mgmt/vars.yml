@@ -25,6 +25,44 @@ vpn_cert_use_existing: "{{ (tuxedovpn_tls_mode | default('selfsigned')) == 'cert
 # open it briefly via iptables only during ACME validation (issue/renew).
 certbot_http01_manage_firewall: true
 
+# TLS cert expiry monitoring (node_exporter textfile collector)
+tuxedovpn_cert_monitor_paths: >-
+  {{
+    (
+      [
+        {
+          "name": "ocserv",
+          "path": (
+            (vpn_cert_use_existing | bool)
+            | ternary(
+                (vpn_cert_fullchain | default('/etc/letsencrypt/live/' ~ (vpn_domain | default(inventory_hostname)) ~ '/fullchain.pem')),
+                (vpn_cert_selfsigned_dir | default('/etc/ocserv/certs')) ~ '/server-cert.pem'
+              )
+          )
+        }
+      ]
+    )
+    +
+    (
+      (mgmt_reverse_proxy_enable | default(false) | bool)
+      | ternary(
+          [
+            {
+              "name": "mgmt-reverse-proxy",
+              "path": (
+                ((mgmt_reverse_proxy_tls_mode | default(tuxedovpn_tls_mode | default('selfsigned'))) == 'certbot')
+                | ternary(
+                    (mgmt_reverse_proxy_letsencrypt_fullchain | default('/etc/letsencrypt/live/' ~ (mgmt_reverse_proxy_cert_name | default(mgmt_reverse_proxy_base_domain | default(vpn_domain | default(inventory_hostname)))) ~ '/fullchain.pem')),
+                    (mgmt_reverse_proxy_selfsigned_dir | default('/etc/tuxedovpn/pki/mgmt-reverse-proxy')) ~ '/server.crt'
+                  )
+              )
+            }
+          ],
+          []
+        )
+    )
+  }}
+
 # Authentication is handled by the local FreeRADIUS instance
 vpn_auth_mode: "radius"
 vpn_radius_accounting: true
@@ -165,9 +203,23 @@ freeradius_enable_simultaneous_use: true
 freeradius_enable_daily_quota: false
 freeradius_enable_blocklist: true
 freeradius_acct_interim_interval: 300
+
+# Safe stale-session cleanup in radacct:
+# - run twice a day
+# - delete only very old "active" rows (likely ghost sessions)
+freeradius_radacct_cleanup_enable: true
+freeradius_radacct_cleanup_max_age: "24 hours"
+freeradius_radacct_cleanup_cron:
+  minute: "0"
+  hour: "*/12"
+  day: "*"
+  month: "*"
+  weekday: "*"
+
 freeradius_accounting_exporter_enable: true
 freeradius_accounting_exporter_listen_ip: "127.0.0.1"
 freeradius_accounting_exporter_listen_port: 9814
+freeradius_accounting_exporter_split_by_nas: true
 
 # FreeRADIUS should accept requests from VPN nodes only via WireGuard.
 freeradius_listen_auth_ip: "{{ mgmt_wireguard_mgmt_ip }}"

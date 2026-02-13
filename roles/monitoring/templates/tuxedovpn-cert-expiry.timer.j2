@@ -1,0 +1,10 @@
+[Unit]
+Description=Run TuxedoVPN TLS cert expiry metrics periodically
+
+[Timer]
+OnBootSec=5m
+OnCalendar={{ tuxedovpn_cert_monitor_timer | default('hourly') }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

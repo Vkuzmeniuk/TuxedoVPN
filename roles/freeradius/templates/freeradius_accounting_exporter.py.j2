@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,15 @@ CONNECT_TIMEOUT_SECONDS = int(float(os.environ.get("FREERADIUS_ACCT_EXPORTER_CON
 STATEMENT_TIMEOUT_MS = int(float(os.environ.get("FREERADIUS_ACCT_EXPORTER_STATEMENT_TIMEOUT", "5")) * 1000)
 TOP_N_USERS = int(os.environ.get("FREERADIUS_ACCT_EXPORTER_TOP_N", "{{ freeradius_accounting_exporter_top_n | default(0) }}"))
 SPLIT_BY_NAS = str(os.environ.get("FREERADIUS_ACCT_EXPORTER_SPLIT_BY_NAS", "0")).strip().lower() in ("1", "true", "yes", "on")
+NAS_NODENAME_MAP = {}
+
+if "FREERADIUS_ACCT_EXPORTER_NAS_NODENAME_MAP" in os.environ:
+    try:
+        NAS_NODENAME_MAP = json.loads(os.environ["FREERADIUS_ACCT_EXPORTER_NAS_NODENAME_MAP"])
+        if not isinstance(NAS_NODENAME_MAP, dict):
+            NAS_NODENAME_MAP = {}
+    except json.JSONDecodeError:
+        NAS_NODENAME_MAP = {}
 
 
 def _escape_label_value(value: str) -> str:
@@ -35,6 +45,18 @@ def _escape_label_value_limited(value: str, max_len: int = 120) -> str:
     if max_len and len(value_s) > max_len:
         value_s = value_s[:max_len]
     return _escape_label_value(value_s)
+
+
+def _nas_to_nodename(nas: str) -> str:
+    if not nas:
+        return ""
+    try:
+        value = NAS_NODENAME_MAP.get(str(nas), "")
+    except Exception:
+        return ""
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _connect():
@@ -98,36 +120,39 @@ def _fetch_user_last_session(cur):
     return cur.fetchall()
 
 
-def _fetch_user_totals_by_nas(cur):
+def _fetch_totals_by_nas(cur):
     cur.execute(
         """
         SELECT
-          username,
           nasipaddress,
-          input_octets::bigint  AS input_octets,
-          output_octets::bigint AS output_octets,
-          total_octets::bigint  AS total_octets
-        FROM radacct_session_usage_by_nas
+          COALESCE(SUM(input_octets), 0)::bigint  AS input_octets,
+          COALESCE(SUM(output_octets), 0)::bigint AS output_octets,
+          COALESCE(SUM(total_octets), 0)::bigint  AS total_octets
+        FROM radacct_session_usage
         WHERE username IS NOT NULL AND username <> ''
-        ORDER BY 1, 2
+          AND nasipaddress IS NOT NULL AND nasipaddress::text <> ''
+        GROUP BY nasipaddress
+        ORDER BY 1
         """
     )
     return cur.fetchall()
 
 
-def _fetch_active_users_by_nas(cur):
+def _fetch_active_totals_by_nas(cur):
     cur.execute(
         """
         SELECT
-          username,
           nasipaddress,
-          active_sessions::bigint AS active_sessions,
-          input_octets::bigint    AS input_octets,
-          output_octets::bigint   AS output_octets,
-          total_octets::bigint    AS total_octets
-        FROM radacct_active_session_counts_by_nas
-        WHERE username IS NOT NULL AND username <> ''
-        ORDER BY 1, 2
+          COUNT(*)::bigint AS active_sessions,
+          COALESCE(SUM(input_octets), 0)::bigint  AS input_octets,
+          COALESCE(SUM(output_octets), 0)::bigint AS output_octets,
+          COALESCE(SUM(total_octets), 0)::bigint  AS total_octets
+        FROM radacct_session_usage
+        WHERE acctstoptime IS NULL
+          AND username IS NOT NULL AND username <> ''
+          AND nasipaddress IS NOT NULL AND nasipaddress::text <> ''
+        GROUP BY nasipaddress
+        ORDER BY 1
         """
     )
     return cur.fetchall()
@@ -153,8 +178,8 @@ def collect_metrics():
                     user_last_session = _fetch_user_last_session(cur)
                 except Exception as exc:
                     user_last_session_error = exc
-                user_totals_by_nas = _fetch_user_totals_by_nas(cur) if SPLIT_BY_NAS else []
-                active_users_by_nas = _fetch_active_users_by_nas(cur) if SPLIT_BY_NAS else []
+                totals_by_nas = _fetch_totals_by_nas(cur) if SPLIT_BY_NAS else []
+                active_totals_by_nas = _fetch_active_totals_by_nas(cur) if SPLIT_BY_NAS else []
         finally:
             conn.close()
     except Exception as exc:
@@ -242,56 +267,82 @@ def collect_metrics():
             % (label_user, label_vpn_ip, label_remote, label_device_id, int(last_seen_ts))
         )
 
+    if NAS_NODENAME_MAP:
+        lines.append("# HELP tuxedovpn_radacct_nas_nodename_info Static NAS->nodename mapping used by the exporter")
+        lines.append("# TYPE tuxedovpn_radacct_nas_nodename_info gauge")
+        for nas, nodename in sorted((str(k), str(v)) for k, v in NAS_NODENAME_MAP.items()):
+            nas_s = nas.strip()
+            nodename_s = nodename.strip()
+            if not nas_s or not nodename_s:
+                continue
+            lines.append(
+                'tuxedovpn_radacct_nas_nodename_info{nas="%s",nodename="%s"} 1'
+                % (_escape_label_value(nas_s), _escape_label_value(nodename_s))
+            )
+
     if SPLIT_BY_NAS:
-        lines.append("# HELP tuxedovpn_radacct_user_input_octets_by_nas_total Cumulative inbound octets per user and NAS")
-        lines.append("# TYPE tuxedovpn_radacct_user_input_octets_by_nas_total counter")
-        lines.append("# HELP tuxedovpn_radacct_user_output_octets_by_nas_total Cumulative outbound octets per user and NAS")
-        lines.append("# TYPE tuxedovpn_radacct_user_output_octets_by_nas_total counter")
-        lines.append("# HELP tuxedovpn_radacct_user_total_octets_by_nas_total Cumulative total octets per user and NAS")
-        lines.append("# TYPE tuxedovpn_radacct_user_total_octets_by_nas_total counter")
+        lines.append("# HELP tuxedovpn_radacct_input_octets_by_nas_total Cumulative inbound octets per NAS (sum over radacct)")
+        lines.append("# TYPE tuxedovpn_radacct_input_octets_by_nas_total counter")
+        lines.append("# HELP tuxedovpn_radacct_output_octets_by_nas_total Cumulative outbound octets per NAS (sum over radacct)")
+        lines.append("# TYPE tuxedovpn_radacct_output_octets_by_nas_total counter")
+        lines.append("# HELP tuxedovpn_radacct_total_octets_by_nas_total Cumulative total octets per NAS (sum over radacct)")
+        lines.append("# TYPE tuxedovpn_radacct_total_octets_by_nas_total counter")
 
-        for username, nas, in_oct, out_oct, total_oct in user_totals_by_nas:
-            label_user = _escape_label_value(username)
+        for nas, in_oct, out_oct, total_oct in totals_by_nas:
             label_nas = _escape_label_value(nas)
-            lines.append(
-                'tuxedovpn_radacct_user_input_octets_by_nas_total{user="%s",nas="%s"} %d' % (label_user, label_nas, int(in_oct))
-            )
-            lines.append(
-                'tuxedovpn_radacct_user_output_octets_by_nas_total{user="%s",nas="%s"} %d'
-                % (label_user, label_nas, int(out_oct))
-            )
-            lines.append(
-                'tuxedovpn_radacct_user_total_octets_by_nas_total{user="%s",nas="%s"} %d' % (label_user, label_nas, int(total_oct))
-            )
+            label_nodename = _escape_label_value(_nas_to_nodename(nas))
+            if label_nodename:
+                lines.append(
+                    'tuxedovpn_radacct_input_octets_by_nas_total{nas="%s",nodename="%s"} %d'
+                    % (label_nas, label_nodename, int(in_oct))
+                )
+                lines.append(
+                    'tuxedovpn_radacct_output_octets_by_nas_total{nas="%s",nodename="%s"} %d'
+                    % (label_nas, label_nodename, int(out_oct))
+                )
+                lines.append(
+                    'tuxedovpn_radacct_total_octets_by_nas_total{nas="%s",nodename="%s"} %d'
+                    % (label_nas, label_nodename, int(total_oct))
+                )
+            else:
+                lines.append('tuxedovpn_radacct_input_octets_by_nas_total{nas="%s"} %d' % (label_nas, int(in_oct)))
+                lines.append('tuxedovpn_radacct_output_octets_by_nas_total{nas="%s"} %d' % (label_nas, int(out_oct)))
+                lines.append('tuxedovpn_radacct_total_octets_by_nas_total{nas="%s"} %d' % (label_nas, int(total_oct)))
 
-        lines.append("# HELP tuxedovpn_radacct_user_active_sessions_by_nas Current active sessions per user and NAS")
-        lines.append("# TYPE tuxedovpn_radacct_user_active_sessions_by_nas gauge")
-        lines.append("# HELP tuxedovpn_radacct_user_active_input_octets_by_nas Current inbound octets for active sessions (user+NAS)")
-        lines.append("# TYPE tuxedovpn_radacct_user_active_input_octets_by_nas gauge")
-        lines.append("# HELP tuxedovpn_radacct_user_active_output_octets_by_nas Current outbound octets for active sessions (user+NAS)")
-        lines.append("# TYPE tuxedovpn_radacct_user_active_output_octets_by_nas gauge")
-        lines.append("# HELP tuxedovpn_radacct_user_active_total_octets_by_nas Current total octets for active sessions (user+NAS)")
-        lines.append("# TYPE tuxedovpn_radacct_user_active_total_octets_by_nas gauge")
+        lines.append("# HELP tuxedovpn_radacct_active_sessions_by_nas Current active sessions per NAS (acctstoptime IS NULL)")
+        lines.append("# TYPE tuxedovpn_radacct_active_sessions_by_nas gauge")
+        lines.append("# HELP tuxedovpn_radacct_active_input_octets_by_nas Current inbound octets for active sessions (sum per NAS)")
+        lines.append("# TYPE tuxedovpn_radacct_active_input_octets_by_nas gauge")
+        lines.append("# HELP tuxedovpn_radacct_active_output_octets_by_nas Current outbound octets for active sessions (sum per NAS)")
+        lines.append("# TYPE tuxedovpn_radacct_active_output_octets_by_nas gauge")
+        lines.append("# HELP tuxedovpn_radacct_active_total_octets_by_nas Current total octets for active sessions (sum per NAS)")
+        lines.append("# TYPE tuxedovpn_radacct_active_total_octets_by_nas gauge")
 
-        for username, nas, sessions, in_oct, out_oct, total_oct in active_users_by_nas:
-            label_user = _escape_label_value(username)
+        for nas, sessions, in_oct, out_oct, total_oct in active_totals_by_nas:
             label_nas = _escape_label_value(nas)
-            lines.append(
-                'tuxedovpn_radacct_user_active_sessions_by_nas{user="%s",nas="%s"} %d'
-                % (label_user, label_nas, int(sessions))
-            )
-            lines.append(
-                'tuxedovpn_radacct_user_active_input_octets_by_nas{user="%s",nas="%s"} %d'
-                % (label_user, label_nas, int(in_oct))
-            )
-            lines.append(
-                'tuxedovpn_radacct_user_active_output_octets_by_nas{user="%s",nas="%s"} %d'
-                % (label_user, label_nas, int(out_oct))
-            )
-            lines.append(
-                'tuxedovpn_radacct_user_active_total_octets_by_nas{user="%s",nas="%s"} %d'
-                % (label_user, label_nas, int(total_oct))
-            )
+            label_nodename = _escape_label_value(_nas_to_nodename(nas))
+            if label_nodename:
+                lines.append(
+                    'tuxedovpn_radacct_active_sessions_by_nas{nas="%s",nodename="%s"} %d'
+                    % (label_nas, label_nodename, int(sessions))
+                )
+                lines.append(
+                    'tuxedovpn_radacct_active_input_octets_by_nas{nas="%s",nodename="%s"} %d'
+                    % (label_nas, label_nodename, int(in_oct))
+                )
+                lines.append(
+                    'tuxedovpn_radacct_active_output_octets_by_nas{nas="%s",nodename="%s"} %d'
+                    % (label_nas, label_nodename, int(out_oct))
+                )
+                lines.append(
+                    'tuxedovpn_radacct_active_total_octets_by_nas{nas="%s",nodename="%s"} %d'
+                    % (label_nas, label_nodename, int(total_oct))
+                )
+            else:
+                lines.append('tuxedovpn_radacct_active_sessions_by_nas{nas="%s"} %d' % (label_nas, int(sessions)))
+                lines.append('tuxedovpn_radacct_active_input_octets_by_nas{nas="%s"} %d' % (label_nas, int(in_oct)))
+                lines.append('tuxedovpn_radacct_active_output_octets_by_nas{nas="%s"} %d' % (label_nas, int(out_oct)))
+                lines.append('tuxedovpn_radacct_active_total_octets_by_nas{nas="%s"} %d' % (label_nas, int(total_oct)))
 
     duration = time.monotonic() - start
     lines.append("# HELP tuxedovpn_freeradius_accounting_exporter_scrape_duration_seconds Exporter scrape duration")

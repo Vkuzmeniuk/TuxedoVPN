@@ -70,7 +70,7 @@ promtail_suricata_eve_enable: true
 - ocserv logs for one host:
   - `{job="ocserv",host="vpn-srv-01"}`
 - DPI agent events:
-  - `{job="journal",unit="tuxedovpn-dpi-agent.service"}`
+  - `{job="dpi",unit="tuxedovpn-dpi-agent.service"}`
 - FreeRADIUS rejects:
   - `{job="freeradius"} |= "Reject"`
 - Fail2Ban bans:

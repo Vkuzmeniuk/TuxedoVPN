@@ -8,13 +8,18 @@ The scrape configuration is rendered from `roles/monitoring/templates/prometheus
 
 - `prometheus`: Prometheus itself (`localhost:9090`)
 - `node_<group>`: `node_exporter` for each inventory group from `prometheus_target_groups`
-- `ocserv_exporter_vpn`: ocserv exporter on VPN nodes (interval 5s)
-- `dpi_agent_vpn`: DPI agent exporter on VPN nodes (interval 5s)
-- `freeradius_prometheus`: FreeRADIUS `rlm_prometheus` on mgmt (interval 15s)
-- `freeradius_accounting` (optional): FreeRADIUS accounting exporter (view from radacct → Prometheus)
+- `ocserv_exporter_vpn`: ocserv exporter on VPN nodes (default interval `10s`, `prometheus_ocserv_exporter_scrape_interval`)
+- `dpi_agent_vpn`: DPI agent exporter on VPN nodes (default interval `5s`, `prometheus_dpi_agent_scrape_interval`)
+- `freeradius_prometheus`: FreeRADIUS `rlm_prometheus` on mgmt (default interval `15s`, `prometheus_freeradius_prometheus_scrape_interval`)
+- `freeradius_accounting` (optional): FreeRADIUS accounting exporter (default interval `30s`, `prometheus_freeradius_accounting_scrape_interval`)
 - `radius_pihole_sync` (optional): metrics from the RADIUS → Pi-hole sync service
 
 Note: for remote targets Prometheus prefers WireGuard IPs when `prometheus_prefer_mgmt_wireguard: true`.
+
+Load note: avoid plotting the same KPI from multiple sources in one dashboard by default.
+Recommended split:
+- OCServ exporter: near-real-time operational view (sessions/connect-disconnect/current throughput)
+- FreeRADIUS accounting exporter: accounting/history view (range usage, per-user totals, last-seen context)
 
 ## Exporters and endpoints
 
@@ -47,6 +52,18 @@ PromQL examples (common panels):
   - `8 * sum by (instance) (rate(node_network_receive_bytes_total{job=~"node_.*",device!~"lo|wg.*"}[$__rate_interval]))`
   - `8 * sum by (instance) (rate(node_network_transmit_bytes_total{job=~"node_.*",device!~"lo|wg.*"}[$__rate_interval]))`
 
+### TLS certificate expiry (node_exporter textfile collector)
+
+- Where it runs: `mgmt` + `vpn` (monitoring role, node mode)
+- Metrics:
+  - `tuxedovpn_tls_cert_expiry_timestamp_seconds{cert,path}` (gauge, UNIX seconds)
+  - `tuxedovpn_tls_cert_probe_success{cert,path}` (gauge, 1 if the cert file was read)
+- Configure monitored certs via `tuxedovpn_cert_monitor_paths` (see `group_vars/mgmt/vars.yml` / `group_vars/vpn.yml`).
+
+PromQL example (alert condition):
+
+- Expiring soon (days): `(tuxedovpn_tls_cert_expiry_timestamp_seconds - time()) / 86400`
+
 ### ocserv exporter (VPN session metrics)
 
 - Where it runs: `vpn` (role: `common-vpn`)
@@ -70,12 +87,18 @@ Metrics (custom):
 - `ocserv_sessions_bytes_received{nodename,user,remote,vpn_ip,group}` (gauge, unit: bytes) – per-session RX bytes snapshot
 - `ocserv_sessions_bytes_sent{nodename,user,remote,vpn_ip,group}` (gauge, unit: bytes) – per-session TX bytes snapshot
 - `ocserv_session_connected_seconds{nodename,user,remote,vpn_ip,group}` (gauge, unit: seconds) – session connected duration
-- `ocserv_sessions_bytes_received_total` / `ocserv_sessions_bytes_sent_total` (gauge, unit: bytes) – aggregate over active sessions
+- `ocserv_sessions_bytes_received_active_sum` / `ocserv_sessions_bytes_sent_active_sum` (gauge, unit: bytes) – snapshot sum across active sessions (can go down when sessions end)
+- `ocserv_sessions_bytes_received_total` / `ocserv_sessions_bytes_sent_total` (counter, unit: bytes) – cumulative bytes across all sessions observed by exporter (useful for `rate()` throughput panels)
+- `ocserv_sessions_connects_total` / `ocserv_sessions_disconnects_total` (counter, unit: sessions) – total connect/disconnect events observed by the exporter
+- `ocserv_session_connects_total{user,group}` / `ocserv_session_disconnects_total{user,group}` (counter, unit: sessions) – per-user connect/disconnect events observed by the exporter
+- `ocserv_exporter_session_keys_total` (gauge, unit: sessions) – number of unique session keys in the latest scrape
+- `ocserv_exporter_session_key_collisions` (gauge, unit: sessions) – how many session key collisions happened in the latest scrape (should be `0`; otherwise connect/disconnect inference may be inaccurate)
 - `ocserv_scrape_timestamp` (gauge, unit: UNIX seconds) – exporter scrape timestamp
 
 Notes:
 
 - `ocserv_sessions_bytes_*` are exported as gauges (current byte counters from ocserv). While a session is alive they behave like counters, but may reset on reconnect.
+- Connect/disconnect counters are derived from a diff between consecutive scrapes. The first successful scrape after exporter start only initializes state (it does not count current sessions as "connects"). Exporter restarts reset counters; use `increase()` / `rate()` which handle counter resets.
 
 PromQL examples (Grafana panels):
 
@@ -86,6 +109,9 @@ PromQL examples (Grafana panels):
 - Top users by current throughput (Bar gauge, unit: bits/sec, query: Instant):
   - `topk(10, 8 * rate(ocserv_sessions_bytes_received{job="$ocserv_job"}[$__rate_interval]))`
   - `topk(10, 8 * rate(ocserv_sessions_bytes_sent{job="$ocserv_job"}[$__rate_interval]))`
+- Disconnect volume (Stat, unit: none, query: Instant): `round(sum(increase(ocserv_sessions_disconnects_total{job="$ocserv_job"}[$__range])))`
+- Top users by disconnects (Bar gauge, unit: none, query: Instant): `topk(10, round(sum by (user) (increase(ocserv_session_disconnects_total{job="$ocserv_job"}[$__range]))))`
+- User flapping (events/min, Time series): `60 * sum by (user) (rate(ocserv_session_disconnects_total{job="$ocserv_job"}[$__rate_interval]))`
 
 Cardinality note: the exporter emits per-session series (labels: `user`, `remote`, `vpn_ip`, `group`).
 
@@ -108,6 +134,16 @@ Metrics (custom):
 - `tuxedovpn_dpi_events_total{nodename,user,reason,stage,result}` (counter, unit: events)
 - `tuxedovpn_dpi_last_event_timestamp_seconds{nodename,user,reason}` (gauge, unit: UNIX seconds)
 
+Notes:
+
+- `tuxedovpn_dpi_events_total` is exported in two forms:
+  - node-level series: `{nodename,stage,result}` (exists from process start; use for alerts/indicators)
+  - per-user series: `{nodename,user,reason,stage,result}`
+- `tuxedovpn_dpi_last_event_timestamp_seconds` always includes a node-level anchor series
+  `{nodename,user="",reason=""}` with value `0`, plus per-user series.
+- DPI signature regex is rendered into the agent config directly (not via systemd escaping), which avoids
+  backslash-escaping surprises for patterns like `\b...\b`.
+
 How to interpret `tuxedovpn_dpi_events_total`:
 
 - This is a cumulative counter since agent start (use `increase()` / `rate()` in PromQL).
@@ -128,8 +164,28 @@ PromQL examples:
 
 - Actual disconnect actions: `sum by (nodename,user,reason) (increase(tuxedovpn_dpi_events_total{stage="disconnect",result="success"}[5m]))`
 - Detection volume: `sum by (nodename,user,reason) (increase(tuxedovpn_dpi_events_total{stage="detect"}[5m]))`
+- Node-level activity (good for "recent activity" indicators): `max by (nodename,stage,result) (increase(tuxedovpn_dpi_events_total[$__rate_interval]))`
 - Event rate (Time series, unit: events/sec): `sum by (nodename,stage,result) (rate(tuxedovpn_dpi_events_total[$__rate_interval]))`
 - Last event time (Table/Stat, unit: datetime): `max by (nodename,user,reason) (tuxedovpn_dpi_last_event_timestamp_seconds) * 1000`
+- Unblock event (alert-friendly): `max by (nodename) (increase(tuxedovpn_dpi_events_total{stage="unblock",result="expired"}[5m])) > 0`
+
+Alert annotation note (keep `user`/`reason`):
+
+- The anchor series `{user="",reason=""}` is only for metric presence. If you do not filter it out,
+  `topk(1, ...)` may choose the anchor and you will lose `user`/`reason`.
+- For Grafana alert query `E` (latest event with labels), use:
+  - `topk by (nodename) (
+      1,
+      tuxedovpn_dpi_last_event_timestamp_seconds{job="dpi_agent_vpn",user!="",reason!=""}
+    )`
+- If you need deterministic "latest per node" matching, use:
+  - `(
+      tuxedovpn_dpi_last_event_timestamp_seconds{job="dpi_agent_vpn",user!="",reason!=""}
+    )
+    == on (nodename) group_left
+    max by (nodename) (
+      tuxedovpn_dpi_last_event_timestamp_seconds{job="dpi_agent_vpn",user!="",reason!=""}
+    )`
 
 Logs (structured):
 
@@ -174,11 +230,17 @@ Metrics (custom):
 - `tuxedovpn_radacct_*_octets_total` (counter, unit: bytes) – totals across all users
 - `tuxedovpn_radacct_user_*_octets_total{user}` (counter, unit: bytes) – per-user totals (optionally top-N)
 - `tuxedovpn_radacct_user_active_*{user}` (gauge, unit: sessions/bytes) – per-user active session snapshot
+- `tuxedovpn_radacct_*_octets_by_nas_total{nas}` (counter, unit: bytes) – per-NAS totals (enabled via `freeradius_accounting_exporter_split_by_nas: true`)
+- `tuxedovpn_radacct_active_*_by_nas{nas}` (gauge, unit: sessions/bytes) – per-NAS active session snapshot (enabled via `freeradius_accounting_exporter_split_by_nas: true`)
+- `tuxedovpn_radacct_nas_nodename_info{nas,nodename}` (gauge, unit: none) – static NAS→nodename mapping used by the accounting exporter (when configured)
 
 Notes:
 
 - All `*_octets_*` metrics are bytes (octets). Multiply by `8` only if you need bits/sec.
 - `*_active_*` metrics are snapshots from the latest accounting update for active sessions (not counters). There may be a delay until an interim update or a stop packet.
+- For throughput comparisons vs near-real-time sources (OCServ, NIC counters), use a larger window on radacct counters:
+  - recommended: 15–30 minutes (at least `3×` the `Acct-Interim-Interval`)
+- If you need to align `nasipaddress` with `nodename` in Grafana, configure a NAS mapping so the exporter adds `nodename` label to per-NAS metrics.
 - Per-user totals can be limited via `freeradius_accounting_exporter_top_n`. When enabled, the `user` variable will see only top-N users.
 - If `radacct` rows are pruned (cleanup of long-running active sessions) or accounting updates are sparse, per-user totals may decrease. Prefer `delta(...[$__range])` (clamped to 0) for "selected range" panels and enable interim updates for more accurate time slicing.
 - Labels of `tuxedovpn_radacct_user_last_seen_timestamp_seconds` depend on what the NAS sends to FreeRADIUS:
@@ -195,6 +257,9 @@ PromQL examples (Grafana panels):
 - Total download/upload (Time series, unit: bits/sec):
   - `8 * rate(tuxedovpn_radacct_input_octets_total{job="$job"}[$__rate_interval])`
   - `8 * rate(tuxedovpn_radacct_output_octets_total{job="$job"}[$__rate_interval])`
+- Total download/upload by NAS (Time series, unit: bits/sec, recommended window: `15m`–`30m`):
+  - `8 * rate(tuxedovpn_radacct_input_octets_by_nas_total{job="$job"}[30m])`
+  - `8 * rate(tuxedovpn_radacct_output_octets_by_nas_total{job="$job"}[30m])`
 - Top users by current throughput (Bar gauge, unit: bits/sec, query: Instant): `topk(10, 8 * rate(tuxedovpn_radacct_user_total_octets_total{job="$job"}[$__rate_interval]))`
 - Per-user throughput (Time series, unit: bits/sec, filtered): `8 * rate(tuxedovpn_radacct_user_total_octets_total{job="$job",user="$user"}[$__rate_interval])`
 - Usage for selected range (Table, unit: GiB, query: Instant):

@@ -1,0 +1,6 @@
+[Unit]
+Description=TuxedoVPN TLS cert expiry metrics (node_exporter textfile)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tuxedovpn_cert_expiry_metrics.sh

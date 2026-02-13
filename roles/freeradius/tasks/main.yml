@@ -72,22 +72,144 @@
     freeradius_validate_vpn_user: "{{ freeradius_validate_private_vpn_user | bool }}"
   when: freeradius_validate_private_vpn_user is defined
 
-- name: Discover PostgreSQL config file
+- name: Discover PostgreSQL config file (primary)
   ansible.builtin.command: psql -tAc "show config_file;"
   become_user: postgres
   register: freeradius_pg_config_file_query
   changed_when: false
+  failed_when: false
+  check_mode: false
 
-- name: Discover PostgreSQL HBA file
+- name: Discover PostgreSQL HBA file (primary)
   ansible.builtin.command: psql -tAc "show hba_file;"
   become_user: postgres
   register: freeradius_pg_hba_file_query
   changed_when: false
+  failed_when: false
+  check_mode: false
 
-- name: Register PostgreSQL config paths
+- name: Capture discovered PostgreSQL config paths (raw)
   ansible.builtin.set_fact:
-    freeradius_pg_config_file: "{{ freeradius_pg_config_file_query.stdout | trim }}"
-    freeradius_pg_hba_file: "{{ freeradius_pg_hba_file_query.stdout | trim }}"
+    _freeradius_pg_config_file_raw: "{{ freeradius_pg_config_file_query.stdout | default('') | trim }}"
+    _freeradius_pg_hba_file_raw: "{{ freeradius_pg_hba_file_query.stdout | default('') | trim }}"
+
+- name: Check discovered PostgreSQL config path (raw)
+  ansible.builtin.stat:
+    path: "{{ _freeradius_pg_config_file_raw }}"
+  register: _freeradius_pg_config_file_stat
+  changed_when: false
+  when: (_freeradius_pg_config_file_raw | default('') | trim | length) > 0
+
+- name: Check discovered PostgreSQL HBA path (raw)
+  ansible.builtin.stat:
+    path: "{{ _freeradius_pg_hba_file_raw }}"
+  register: _freeradius_pg_hba_file_stat
+  changed_when: false
+  when: (_freeradius_pg_hba_file_raw | default('') | trim | length) > 0
+
+- name: Fallback detect PostgreSQL config file path
+  ansible.builtin.shell: |
+    set -euo pipefail
+    shopt -s nullglob
+    for f in \
+      /etc/postgresql/*/main/postgresql.conf \
+      /var/lib/postgresql/*/main/postgresql.conf \
+      /var/lib/postgresql/data/postgresql.conf \
+      /var/lib/pgsql/*/data/postgresql.conf \
+      /var/lib/pgsql/data/postgresql.conf
+    do
+      [[ -f "${f}" ]] && { echo "${f}"; exit 0; }
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  register: _freeradius_pg_config_file_fallback
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: >-
+    (_freeradius_pg_config_file_raw | default('') | trim | length) == 0
+    or not (_freeradius_pg_config_file_stat.stat.exists | default(false))
+
+- name: Fallback detect PostgreSQL HBA file path
+  ansible.builtin.shell: |
+    set -euo pipefail
+    shopt -s nullglob
+    for f in \
+      /etc/postgresql/*/main/pg_hba.conf \
+      /var/lib/postgresql/*/main/pg_hba.conf \
+      /var/lib/postgresql/data/pg_hba.conf \
+      /var/lib/pgsql/*/data/pg_hba.conf \
+      /var/lib/pgsql/data/pg_hba.conf
+    do
+      [[ -f "${f}" ]] && { echo "${f}"; exit 0; }
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  register: _freeradius_pg_hba_file_fallback
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: >-
+    (_freeradius_pg_hba_file_raw | default('') | trim | length) == 0
+    or not (_freeradius_pg_hba_file_stat.stat.exists | default(false))
+
+- name: Register effective PostgreSQL config paths
+  ansible.builtin.set_fact:
+    freeradius_pg_config_file: >-
+      {{
+        _freeradius_pg_config_file_raw
+        if (
+          (_freeradius_pg_config_file_raw | default('') | trim | length) > 0
+          and (_freeradius_pg_config_file_stat is defined)
+          and (_freeradius_pg_config_file_stat.stat.exists | default(false))
+        )
+        else (_freeradius_pg_config_file_fallback.stdout | default('') | trim)
+      }}
+    freeradius_pg_hba_file: >-
+      {{
+        _freeradius_pg_hba_file_raw
+        if (
+          (_freeradius_pg_hba_file_raw | default('') | trim | length) > 0
+          and (_freeradius_pg_hba_file_stat is defined)
+          and (_freeradius_pg_hba_file_stat.stat.exists | default(false))
+        )
+        else (_freeradius_pg_hba_file_fallback.stdout | default('') | trim)
+      }}
+
+- name: Ensure PostgreSQL config paths were resolved
+  ansible.builtin.assert:
+    that:
+      - (freeradius_pg_config_file | default('') | trim | length) > 0
+      - (freeradius_pg_hba_file | default('') | trim | length) > 0
+    fail_msg: >-
+      Could not determine PostgreSQL config/hba paths automatically.
+      psql config_file={{ _freeradius_pg_config_file_raw | default('') }},
+      psql hba_file={{ _freeradius_pg_hba_file_raw | default('') }}.
+      Set `freeradius_pg_config_file` and `freeradius_pg_hba_file` explicitly in inventory if autodetect is unavailable.
+
+- name: Check effective PostgreSQL config path exists
+  ansible.builtin.stat:
+    path: "{{ freeradius_pg_config_file }}"
+  register: _freeradius_pg_config_file_effective_stat
+  changed_when: false
+
+- name: Check effective PostgreSQL HBA path exists
+  ansible.builtin.stat:
+    path: "{{ freeradius_pg_hba_file }}"
+  register: _freeradius_pg_hba_file_effective_stat
+  changed_when: false
+
+- name: Ensure effective PostgreSQL config files exist
+  ansible.builtin.assert:
+    that:
+      - _freeradius_pg_config_file_effective_stat.stat.exists | default(false)
+      - _freeradius_pg_hba_file_effective_stat.stat.exists | default(false)
+    fail_msg: >-
+      Resolved PostgreSQL paths do not exist:
+      config_file={{ freeradius_pg_config_file }},
+      hba_file={{ freeradius_pg_hba_file }}.
 
 - name: Build VPN host CIDR list
   ansible.builtin.set_fact:
@@ -498,7 +620,7 @@
         cmd: >
           psql -d {{ freeradius_db_name }} -tAc
           "SELECT COUNT(*)
-             FROM radcheck
+             FROM {{ freeradius_sql_authcheck_table | default('radcheck') }}
             WHERE username = '{{ freeradius_managed_vpn_username_sql }}'
               AND attribute = 'Cleartext-Password'
               AND op = ':='"
@@ -510,11 +632,11 @@
       ansible.builtin.shell: |
         set -o pipefail
         psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 <<'SQL'
-        DELETE FROM radcheck
+        DELETE FROM {{ freeradius_sql_authcheck_table | default('radcheck') }}
          WHERE username = '{{ freeradius_managed_vpn_username_sql }}'
            AND attribute = 'Cleartext-Password'
            AND op = ':=';
-        INSERT INTO radcheck (username, attribute, op, value)
+        INSERT INTO {{ freeradius_sql_authcheck_table | default('radcheck') }} (username, attribute, op, value)
         VALUES ('{{ freeradius_managed_vpn_username_sql }}', 'Cleartext-Password', ':=', '{{ freeradius_managed_vpn_password_sql }}');
         SQL
       args:
@@ -530,7 +652,7 @@
         cmd: >
           psql -d {{ freeradius_db_name }} -tAc
           "SELECT COUNT(*)
-             FROM radcheck
+             FROM {{ freeradius_sql_authcheck_table | default('radcheck') }}
             WHERE username = '{{ freeradius_managed_vpn_username_sql }}'
               AND attribute = 'Cleartext-Password'
               AND op = ':='"
@@ -538,12 +660,57 @@
       register: freeradius_managed_vpn_user_radcheck_count
       changed_when: false
 
+    - name: Fallback reseed default VPN user in authcheck table when still missing
+      ansible.builtin.shell: |
+        set -o pipefail
+        psql -d {{ freeradius_db_name }} -v ON_ERROR_STOP=1 <<'SQL'
+        DELETE FROM {{ freeradius_sql_authcheck_table | default('radcheck') }}
+         WHERE username = '{{ freeradius_managed_vpn_username_sql }}'
+           AND attribute = 'Cleartext-Password'
+           AND op = ':=';
+        INSERT INTO {{ freeradius_sql_authcheck_table | default('radcheck') }} (username, attribute, op, value)
+        VALUES ('{{ freeradius_managed_vpn_username_sql }}', 'Cleartext-Password', ':=', '{{ freeradius_managed_vpn_password_sql }}');
+        SQL
+      args:
+        executable: /bin/bash
+      become_user: postgres
+      register: freeradius_managed_vpn_user_radcheck_fallback_reseed
+      changed_when: freeradius_managed_vpn_user_radcheck_fallback_reseed.rc == 0
+      when: (freeradius_managed_vpn_user_radcheck_count.stdout | default('0') | trim | int) == 0
+      no_log: true
+
+    - name: Re-check default VPN user authcheck entry after fallback
+      ansible.builtin.command:
+        cmd: >
+          psql -d {{ freeradius_db_name }} -tAc
+          "SELECT COUNT(*)
+             FROM {{ freeradius_sql_authcheck_table | default('radcheck') }}
+            WHERE username = '{{ freeradius_managed_vpn_username_sql }}'
+              AND attribute = 'Cleartext-Password'
+              AND op = ':='"
+      become_user: postgres
+      register: freeradius_managed_vpn_user_radcheck_count_after_fallback
+      changed_when: false
+      when: freeradius_managed_vpn_user_radcheck_fallback_reseed is defined
+
+    - name: Set effective authcheck count for default VPN user
+      ansible.builtin.set_fact:
+        freeradius_managed_vpn_user_authcheck_count_effective: >-
+          {{
+            (
+              freeradius_managed_vpn_user_radcheck_count_after_fallback.stdout
+              if (freeradius_managed_vpn_user_radcheck_count_after_fallback is defined)
+              else freeradius_managed_vpn_user_radcheck_count.stdout
+            ) | default('0') | trim | int
+          }}
+      changed_when: false
+
     - name: Fetch default VPN user radcheck value
       ansible.builtin.command:
         cmd: >
           psql -d {{ freeradius_db_name }} -tAc
           "SELECT value
-             FROM radcheck
+             FROM {{ freeradius_sql_authcheck_table | default('radcheck') }}
             WHERE username = '{{ freeradius_managed_vpn_username_sql }}'
               AND attribute = 'Cleartext-Password'
               AND op = ':='
@@ -552,21 +719,23 @@
       become_user: postgres
       register: freeradius_managed_vpn_user_radcheck_value
       changed_when: false
-      when: (freeradius_managed_vpn_user_radcheck_count.stdout | default('0') | trim | int) > 0
+      when: (freeradius_managed_vpn_user_authcheck_count_effective | default(0) | int) > 0
       no_log: true
 
     - name: Ensure radcheck contains default VPN user
       ansible.builtin.assert:
         that:
-          - (freeradius_managed_vpn_user_radcheck_count.stdout | default('0') | trim | int) > 0
-        fail_msg: "Failed to synchronize user {{ freeradius_managed_vpn_username }} in the radcheck table."
+          - (freeradius_managed_vpn_user_authcheck_count_effective | default(0) | int) > 0
+        fail_msg: >-
+          Failed to synchronize user {{ freeradius_managed_vpn_username }}
+          in {{ freeradius_sql_authcheck_table | default('radcheck') }}.
 
 - name: Ensure radcheck password matches expected default VPN user password
   ansible.builtin.assert:
     that:
       - (freeradius_managed_vpn_user_radcheck_value.stdout | default('') | trim) == (freeradius_managed_vpn_password | default('') | string)
     fail_msg: "Password for user {{ freeradius_managed_vpn_username }} in radcheck does not match the expected value."
-  when: (freeradius_managed_vpn_user_radcheck_count.stdout | default('0') | trim | int) > 0
+  when: (freeradius_managed_vpn_user_authcheck_count_effective | default(0) | int) > 0
   no_log: true
 
 - name: Validate extra RADIUS user definitions
@@ -1271,6 +1440,33 @@
     name: "{{ freeradius_radius_service_name }}"
     state: started
   tags: ['freeradius', 'service']
+
+- name: Build NAS->nodename map for FreeRADIUS accounting exporter
+  ansible.builtin.set_fact:
+    freeradius_accounting_exporter_nas_nodename_map: >-
+      {{
+        _nas_map_entries
+        | combine(freeradius_accounting_exporter_nas_nodename_map | default({}))
+      }}
+  vars:
+    _nodename: >-
+      {{
+        hostvars[item].ansible_nodename
+        | default(hostvars[item].ansible_hostname, true)
+        | default(item, true)
+      }}
+    _public_ip: "{{ hostvars[item].ansible_host | default('') | trim }}"
+    _wg_ip: "{{ hostvars[item].mgmt_wireguard_wireguard_ip | default('') | trim }}"
+    _nas_map_entries: >-
+      {{
+        {}
+        | combine((_public_ip | length > 0) | ternary({_public_ip: _nodename}, {}))
+        | combine((_wg_ip | length > 0) | ternary({_wg_ip: _nodename}, {}))
+      }}
+  loop: "{{ groups['vpn'] | default([]) }}"
+  when: freeradius_accounting_exporter_enable | default(false) | bool
+  changed_when: false
+  tags: ['freeradius', 'metrics']
 
 - name: Deploy FreeRADIUS accounting (radacct) exporter script
   ansible.builtin.template:

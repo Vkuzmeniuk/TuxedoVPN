@@ -24,6 +24,23 @@ vpn_cert_use_existing: "{{ (tuxedovpn_tls_mode | default('selfsigned')) == 'cert
 # When using HTTP-01 (standalone) we keep inbound tcp/80 closed by default and
 # open it briefly via iptables only during ACME validation (issue/renew).
 certbot_http01_manage_firewall: true
+
+# TLS cert expiry monitoring (node_exporter textfile collector)
+tuxedovpn_cert_monitor_paths: >-
+  {{
+    [
+      {
+        "name": "ocserv",
+        "path": (
+          (vpn_cert_use_existing | bool)
+          | ternary(
+              (vpn_cert_fullchain | default('/etc/letsencrypt/live/' ~ (vpn_domain | default(inventory_hostname)) ~ '/fullchain.pem')),
+              (vpn_cert_selfsigned_dir | default('/etc/ocserv/certs')) ~ '/server-cert.pem'
+            )
+        )
+      }
+    ]
+  }}
 vpn_listen_host: "0.0.0.0"
 vpn_listen_proxy_proto: false
 vpn_radius_accounting: true
@@ -48,6 +65,11 @@ vpn_camouflage_enabled: true
 vpn_nat_subnets:
   - "{{ vpn_network_address }}/{{ vpn_network_prefix_length | default(24) }}"
 
+# Keep public VPN sessions alive across app backgrounding / network pauses.
+# 0 disables idle-based disconnects in ocserv.
+vpn_idle_timeout: 0
+vpn_mobile_idle_timeout: 0
+
 # Enforce FreeRADIUS blocklist on reconnects:
 # ocserv cookies may allow fast reconnects without a new RADIUS authentication.
 # Set to 0 to force re-auth on every reconnect (recommended when DPI blocklist is enabled).
@@ -58,3 +80,11 @@ vpn_enable_mangle: true
 
 # DPI: send events to the mgmt webhook for temporary blocking + Telegram.
 dpi_mgmt_webhook_url: "http://{{ mgmt_wireguard_mgmt_ip }}:9816/event"
+
+# DPI enforcement tuning: reduce "only on reconnect" behavior by making live disconnects faster
+# and keeping IP-based blocks long enough for username resolution.
+dpi_agent_enforce_poll_seconds: 1
+dpi_agent_enforce_min_interval_seconds: 1
+dpi_agent_disconnect_cooldown_seconds: 5
+dpi_agent_action_cooldown_seconds: 5
+dpi_agent_ip_correlation_seconds: 600

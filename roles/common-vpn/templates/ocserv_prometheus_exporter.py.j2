@@ -3,13 +3,14 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 OCCTL_BIN = os.environ.get("OCSERV_EXPORTER_OCCTL", "{{ common_vpn_exporter_occtl_path }}")
 LISTEN_HOST = os.environ.get("OCSERV_EXPORTER_LISTEN_HOST", "{{ common_vpn_exporter_listen_ip }}")
 LISTEN_PORT = int(os.environ.get("OCSERV_EXPORTER_LISTEN_PORT", "{{ common_vpn_exporter_listen_port }}"))
-#METRICS_PATH = os.environ.get("OCSERV_EXPORTER_METRICS_PATH", "{{ common_vpn_exporter_metrics_path }}")
+METRICS_PATH = (os.environ.get("OCSERV_EXPORTER_METRICS_PATH", "{{ common_vpn_exporter_metrics_path }}") or "/metrics").strip()
 SCRAPE_TIMEOUT = float(os.environ.get("OCSERV_EXPORTER_TIMEOUT", "5"))
 STATIC_LABELS = {}
 
@@ -20,6 +21,16 @@ if "OCSERV_EXPORTER_STATIC_LABELS" in os.environ:
             STATIC_LABELS = {}
     except json.JSONDecodeError:
         STATIC_LABELS = {}
+
+
+_STATE_LOCK = threading.Lock()
+_prev_sessions_by_key = None  # type: ignore[var-annotated]
+_connects_total = 0
+_disconnects_total = 0
+_connects_by_user = {}
+_disconnects_by_user = {}
+_bytes_received_total = 0
+_bytes_sent_total = 0
 
 
 def _format_labels(extra=None):
@@ -88,6 +99,104 @@ def _safe_get(mapping, *keys, default=0):
     return value
 
 
+def _clean_label(value, default=""):
+    if value is None:
+        return default
+    text = str(value).strip()
+    if text.lower() in ("(none)", "none", "(null)", "null", "n/a", "(n/a)"):
+        return default
+    return text if text else default
+
+
+def _extract_session_labels(session):
+    username = _clean_label(session.get("Username") or session.get("User"), default="unknown")
+    remote_ip = _clean_label(session.get("Remote IP") or session.get("remote-host") or session.get("remote"), default="")
+    vpn_ip = _clean_label(session.get("IPv4") or session.get("ip") or session.get("assigned_ip"), default="")
+    group = _clean_label(session.get("GroupName") or session.get("profile"), default="")
+    return username, remote_ip, vpn_ip, group
+
+
+def _session_key(session, username, remote_ip, vpn_ip, group):
+    for key in (
+        "SID",
+        "sid",
+        "SessionID",
+        "Session Id",
+        "Session ID",
+        "session_id",
+        "sessionid",
+        "session-id",
+    ):
+        if key in session:
+            value = _clean_label(session.get(key), default="")
+            if value not in ("", "0"):
+                return f"sid:{value}|u:{username}"
+    return f"u:{username}|v:{vpn_ip}|r:{remote_ip}|g:{group}"
+
+
+def _inc_counter(store, user, group, amount=1):
+    if not user:
+        user = "unknown"
+    key = (str(user), str(group or ""))
+    store[key] = int(store.get(key, 0)) + int(amount)
+
+
+def _update_session_event_state(current_sessions_by_key):
+    global _prev_sessions_by_key
+    global _connects_total
+    global _disconnects_total
+    global _bytes_received_total
+    global _bytes_sent_total
+
+    with _STATE_LOCK:
+        if _prev_sessions_by_key is None:
+            _prev_sessions_by_key = dict(current_sessions_by_key)
+            return
+
+        prev_keys = set(_prev_sessions_by_key.keys())
+        cur_keys = set(current_sessions_by_key.keys())
+        for key in cur_keys - prev_keys:
+            info = current_sessions_by_key.get(key) or {}
+            user = info.get("user") or "unknown"
+            group = info.get("group") or ""
+            _connects_total += 1
+            _inc_counter(_connects_by_user, user, group, 1)
+
+        for key in prev_keys - cur_keys:
+            info = _prev_sessions_by_key.get(key) or {}
+            user = info.get("user") or "unknown"
+            group = info.get("group") or ""
+            _disconnects_total += 1
+            _inc_counter(_disconnects_by_user, user, group, 1)
+
+        for key in cur_keys & prev_keys:
+            cur = current_sessions_by_key.get(key) or {}
+            prev = _prev_sessions_by_key.get(key) or {}
+            try:
+                cur_rx = float(cur.get("rx", 0) or 0)
+                prev_rx = float(prev.get("rx", 0) or 0)
+                cur_tx = float(cur.get("tx", 0) or 0)
+                prev_tx = float(prev.get("tx", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+
+            # We want monotonic per-scrape increments. If a series "resets" (new session with same labels,
+            # ocserv restart, etc.), treat it as a counter reset and use current value as the increment.
+            delta_rx = cur_rx - prev_rx
+            if delta_rx < 0:
+                delta_rx = cur_rx
+            delta_tx = cur_tx - prev_tx
+            if delta_tx < 0:
+                delta_tx = cur_tx
+
+            if delta_rx > 0:
+                _bytes_received_total += int(delta_rx)
+            if delta_tx > 0:
+                _bytes_sent_total += int(delta_tx)
+
+        _prev_sessions_by_key = dict(current_sessions_by_key)
+
+
 def collect_metrics():
     lines = []
     now = int(time.time())
@@ -113,11 +222,10 @@ def collect_metrics():
     lines.append("# HELP ocserv_session_connected_seconds Session connected duration")
     lines.append("# TYPE ocserv_session_connected_seconds gauge")
 
+    current_sessions_by_key = {}
+    session_key_collisions = 0
     for session in sessions:
-        username = session.get("Username") or session.get("User") or "unknown"
-        remote_ip = session.get("Remote IP") or session.get("remote-host") or session.get("remote")
-        vpn_ip = session.get("IPv4") or session.get("ip") or session.get("assigned_ip")
-        group = session.get("GroupName") or session.get("profile")
+        username, remote_ip, vpn_ip, group = _extract_session_labels(session)
         rx = _safe_get(session, "stats", "RX", "bytes", default=_safe_get(session, "RX", default=0))
         tx = _safe_get(session, "stats", "TX", "bytes", default=_safe_get(session, "TX", default=0))
         duration = session.get("raw_connected_at") or session.get("connected_time") or session.get("duration") or session.get("uptime") or 0
@@ -138,6 +246,16 @@ def collect_metrics():
         agg_rx += rx_val
         agg_tx += tx_val
 
+        key = _session_key(session, username, remote_ip, vpn_ip, group)
+        if key in current_sessions_by_key:
+            session_key_collisions += 1
+        current_sessions_by_key[key] = {
+            "user": username,
+            "group": group or "",
+            "rx": rx_val,
+            "tx": tx_val,
+        }
+
         labels = {
             "user": username,
             "remote": remote_ip or "",
@@ -149,12 +267,53 @@ def collect_metrics():
         lines.append(f"ocserv_sessions_bytes_sent{_format_labels(labels)} {tx_val}")
         lines.append(f"ocserv_session_connected_seconds{_format_labels(labels)} {dur_val}")
 
-    lines.append("# HELP ocserv_sessions_bytes_received_total Total bytes received across all active sessions")
-    lines.append("# TYPE ocserv_sessions_bytes_received_total gauge")
-    lines.append("# HELP ocserv_sessions_bytes_sent_total Total bytes sent across all active sessions")
-    lines.append("# TYPE ocserv_sessions_bytes_sent_total gauge")
-    lines.append(f"ocserv_sessions_bytes_received_total{_format_labels()} {agg_rx}")
-    lines.append(f"ocserv_sessions_bytes_sent_total{_format_labels()} {agg_tx}")
+    _update_session_event_state(current_sessions_by_key)
+
+    lines.append("# HELP ocserv_sessions_bytes_received_active_sum Sum of RX bytes across active sessions (snapshot)")
+    lines.append("# TYPE ocserv_sessions_bytes_received_active_sum gauge")
+    lines.append("# HELP ocserv_sessions_bytes_sent_active_sum Sum of TX bytes across active sessions (snapshot)")
+    lines.append("# TYPE ocserv_sessions_bytes_sent_active_sum gauge")
+    lines.append(f"ocserv_sessions_bytes_received_active_sum{_format_labels()} {agg_rx}")
+    lines.append(f"ocserv_sessions_bytes_sent_active_sum{_format_labels()} {agg_tx}")
+
+    lines.append("# HELP ocserv_exporter_session_key_collisions Number of session-key collisions in the latest scrape")
+    lines.append("# TYPE ocserv_exporter_session_key_collisions gauge")
+    lines.append(f"ocserv_exporter_session_key_collisions{_format_labels()} {int(session_key_collisions)}")
+    lines.append("# HELP ocserv_exporter_session_keys_total Number of unique session keys in the latest scrape")
+    lines.append("# TYPE ocserv_exporter_session_keys_total gauge")
+    lines.append(f"ocserv_exporter_session_keys_total{_format_labels()} {int(len(current_sessions_by_key))}")
+
+    with _STATE_LOCK:
+        bytes_received_total = int(_bytes_received_total)
+        bytes_sent_total = int(_bytes_sent_total)
+        connects_total = int(_connects_total)
+        disconnects_total = int(_disconnects_total)
+        connects_by_user = list(sorted(_connects_by_user.items()))
+        disconnects_by_user = list(sorted(_disconnects_by_user.items()))
+
+    lines.append("# HELP ocserv_sessions_bytes_received_total Cumulative bytes received across all sessions observed by exporter")
+    lines.append("# TYPE ocserv_sessions_bytes_received_total counter")
+    lines.append("# HELP ocserv_sessions_bytes_sent_total Cumulative bytes sent across all sessions observed by exporter")
+    lines.append("# TYPE ocserv_sessions_bytes_sent_total counter")
+    lines.append(f"ocserv_sessions_bytes_received_total{_format_labels()} {bytes_received_total}")
+    lines.append(f"ocserv_sessions_bytes_sent_total{_format_labels()} {bytes_sent_total}")
+
+    lines.append("# HELP ocserv_sessions_connects_total Total session connect events observed by exporter")
+    lines.append("# TYPE ocserv_sessions_connects_total counter")
+    lines.append("# HELP ocserv_sessions_disconnects_total Total session disconnect events observed by exporter")
+    lines.append("# TYPE ocserv_sessions_disconnects_total counter")
+    lines.append(f"ocserv_sessions_connects_total{_format_labels()} {connects_total}")
+    lines.append(f"ocserv_sessions_disconnects_total{_format_labels()} {disconnects_total}")
+
+    lines.append("# HELP ocserv_session_connects_total Session connect events by user/group observed by exporter")
+    lines.append("# TYPE ocserv_session_connects_total counter")
+    lines.append("# HELP ocserv_session_disconnects_total Session disconnect events by user/group observed by exporter")
+    lines.append("# TYPE ocserv_session_disconnects_total counter")
+    for (user, group), value in connects_by_user:
+        lines.append(f"ocserv_session_connects_total{_format_labels({'user': user, 'group': group})} {int(value)}")
+    for (user, group), value in disconnects_by_user:
+        lines.append(f"ocserv_session_disconnects_total{_format_labels({'user': user, 'group': group})} {int(value)}")
+
     lines.append("# HELP ocserv_scrape_timestamp Exporter scrape UNIX timestamp")
     lines.append("# TYPE ocserv_scrape_timestamp gauge")
     lines.append(f"ocserv_scrape_timestamp{_format_labels()} {now}")
@@ -164,11 +323,12 @@ def collect_metrics():
 
 class MetricsHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        #if self.path.rstrip("/") != METRICS_PATH.rstrip("/"):
-        #    self.send_response(404)
-        #    self.end_headers()
-        #    self.wfile.write(b"Not Found\n")
-        #    return
+        request_path = (self.path or "/").split("?", 1)[0]
+        if request_path.rstrip("/") != METRICS_PATH.rstrip("/"):
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found\n")
+            return
         body, status = collect_metrics()
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")

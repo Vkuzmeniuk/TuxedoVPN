@@ -9,6 +9,24 @@ grafana_enable_loki_datasource: "{{ loki_enable | default(false) | bool }}"
 grafana_loki_datasource_name: "Loki"
 grafana_loki_datasource_url: "http://localhost:3100"
 
+# node_exporter textfile collector (for custom metrics like cert expiry)
+node_exporter_textfile_collector_enable: true
+node_exporter_textfile_collector_dir: "/var/lib/node_exporter/textfile_collector"
+node_exporter_extra_args: ""
+
+# TLS cert expiry metrics (rendered to node_exporter textfile collector)
+tuxedovpn_cert_monitor_enable: true
+tuxedovpn_cert_monitor_timer: "hourly"
+tuxedovpn_cert_monitor_paths: []
+
 # Prefer scraping node/exporter targets via the mgmt<->vpn WireGuard tunnel
 # when `hostvars[<host>].mgmt_wireguard_wireguard_ip` is available.
 prometheus_prefer_mgmt_wireguard: true
+
+# Scrape intervals for non-node exporters. Kept separate to avoid over-scraping
+# expensive exporters while preserving near-real-time visibility where needed.
+prometheus_freeradius_prometheus_scrape_interval: "15s"
+prometheus_freeradius_accounting_scrape_interval: "30s"
+prometheus_radius_pihole_sync_scrape_interval: "15s"
+prometheus_ocserv_exporter_scrape_interval: "10s"
+prometheus_dpi_agent_scrape_interval: "5s"

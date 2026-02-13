@@ -7,6 +7,122 @@
     lock_timeout: "{{ apt_lock_timeout | default(600) | int }}"
   tags: ['node_exporter']
 
+- name: Ensure node_exporter textfile collector directory exists
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_collector_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: node_exporter_textfile_collector_enable | default(false) | bool
+  tags: ['node_exporter']
+
+- name: Build node_exporter args
+  ansible.builtin.set_fact:
+    node_exporter_effective_args: >-
+      {{
+        (
+          (
+            (node_exporter_textfile_collector_enable | default(false) | bool)
+            | ternary(['--collector.textfile.directory=' ~ node_exporter_textfile_collector_dir], [])
+          )
+          +
+          (
+            (node_exporter_extra_args | default('') | trim | length > 0)
+            | ternary([node_exporter_extra_args | trim], [])
+          )
+        )
+        | join(' ')
+      }}
+  changed_when: false
+  when: (node_exporter_textfile_collector_enable | default(false) | bool) or (node_exporter_extra_args | default('') | trim | length > 0)
+  tags: ['node_exporter']
+
+- name: Configure node_exporter args (textfile collector)
+  ansible.builtin.lineinfile:
+    path: /etc/default/prometheus-node-exporter
+    regexp: '^ARGS='
+    line: "ARGS=\"{{ node_exporter_effective_args }}\""
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  when: node_exporter_effective_args is defined
+  notify: Restart node_exporter
+  tags: ['node_exporter']
+
+- name: Normalize cert monitor list
+  ansible.builtin.set_fact:
+    tuxedovpn_cert_monitor_entries: "{{ (tuxedovpn_cert_monitor_paths | default([])) | list }}"
+  changed_when: false
+  tags: ['node_exporter']
+
+- name: Install TLS cert expiry metrics script
+  ansible.builtin.template:
+    src: tuxedovpn-cert-expiry-metrics.sh.j2
+    dest: /usr/local/bin/tuxedovpn_cert_expiry_metrics.sh
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - tuxedovpn_cert_monitor_enable | default(false) | bool
+    - (tuxedovpn_cert_monitor_entries | length) > 0
+  tags: ['node_exporter']
+
+- name: Install TLS cert expiry systemd unit
+  ansible.builtin.template:
+    src: tuxedovpn-cert-expiry.service.j2
+    dest: /etc/systemd/system/tuxedovpn-cert-expiry.service
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - tuxedovpn_cert_monitor_enable | default(false) | bool
+    - (tuxedovpn_cert_monitor_entries | length) > 0
+  tags: ['node_exporter']
+
+- name: Install TLS cert expiry systemd timer
+  ansible.builtin.template:
+    src: tuxedovpn-cert-expiry.timer.j2
+    dest: /etc/systemd/system/tuxedovpn-cert-expiry.timer
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - tuxedovpn_cert_monitor_enable | default(false) | bool
+    - (tuxedovpn_cert_monitor_entries | length) > 0
+  tags: ['node_exporter']
+
+- name: Ensure TLS cert expiry timer is enabled and running
+  ansible.builtin.systemd:
+    name: tuxedovpn-cert-expiry.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  when:
+    - tuxedovpn_cert_monitor_enable | default(false) | bool
+    - (tuxedovpn_cert_monitor_entries | length) > 0
+  tags: ['node_exporter']
+
+- name: Run TLS cert expiry metrics script once
+  ansible.builtin.command: /usr/local/bin/tuxedovpn_cert_expiry_metrics.sh
+  changed_when: false
+  when:
+    - tuxedovpn_cert_monitor_enable | default(false) | bool
+    - (tuxedovpn_cert_monitor_entries | length) > 0
+  tags: ['node_exporter']
+
+- name: Disable TLS cert expiry timer when not configured
+  ansible.builtin.systemd:
+    name: tuxedovpn-cert-expiry.timer
+    state: stopped
+    enabled: false
+    daemon_reload: true
+  when:
+    - not (tuxedovpn_cert_monitor_enable | default(false) | bool) or (tuxedovpn_cert_monitor_entries | length == 0)
+  failed_when: false
+  tags: ['node_exporter']
+
 - name: Ensure node_exporter running
   ansible.builtin.service:
     name: prometheus-node-exporter

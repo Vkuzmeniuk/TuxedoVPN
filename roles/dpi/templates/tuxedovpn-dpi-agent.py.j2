@@ -17,7 +17,10 @@ EVE_FILE = os.environ.get("EVE_FILE", "/var/log/suricata/eve.json")
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "9815"))
 METRICS_PATH = os.environ.get("METRICS_PATH", "/metrics")
-SIGNATURE_MATCH_REGEX = os.environ.get("SIGNATURE_MATCH_REGEX", r"(?i)\b(torrent|bittorrent)\b")
+SIGNATURE_MATCH_REGEX = os.environ.get(
+    "SIGNATURE_MATCH_REGEX",
+    "{{ dpi_agent_signature_match_regex | replace('\\', '\\\\') | replace('\"', '\\\"') }}",
+)
 MATCH_MODE = (os.environ.get("MATCH_MODE", "ruleset") or "ruleset").strip().lower()
 RULESET_PATH = os.environ.get("RULESET_PATH", "/var/lib/suricata/rules/suricata.rules")
 IGNORE_SIDS_RAW = os.environ.get("IGNORE_SIDS", "")
@@ -30,6 +33,7 @@ DISCONNECT_COOLDOWN_SECONDS = int(os.environ.get("DISCONNECT_COOLDOWN_SECONDS", 
 DETECT_DEDUP_SECONDS = int(os.environ.get("DETECT_DEDUP_SECONDS", str(DISCONNECT_COOLDOWN_SECONDS)))
 ACTION_COOLDOWN_SECONDS = int(os.environ.get("ACTION_COOLDOWN_SECONDS", str(DISCONNECT_COOLDOWN_SECONDS)))
 OCCTL_BIN = os.environ.get("OCCTL_BIN", "/usr/bin/occtl")
+OCCTL_CACHE_SECONDS = int(os.environ.get("OCCTL_CACHE_SECONDS", "5"))
 VPN_SUBNETS_RAW = os.environ.get("VPN_SUBNETS", "")
 MGMT_WEBHOOK_URL = os.environ.get("MGMT_WEBHOOK_URL", "").strip()
 MGMT_WEBHOOK_TOKEN = os.environ.get("MGMT_WEBHOOK_TOKEN", "").strip()
@@ -162,6 +166,16 @@ class Metrics:
     def __init__(self):
         self.lock = threading.Lock()
         self.start_ts = int(time.time())
+        self.node_event_total = {
+            ("detect", "match"): 0,
+            ("disconnect", "success"): 0,
+            ("disconnect", "fail"): 0,
+            ("disconnect", "error"): 0,
+            ("disconnect", "cooldown"): 0,
+            ("unblock", "expired"): 0,
+            ("webhook", "success"): 0,
+            ("webhook", "fail"): 0,
+        }  # (stage, result) -> int
         self.event_total = {}  # (user, reason, stage, result) -> int
         self.last_event_ts = {}  # (user, reason) -> int
         self.last_disconnect_by_user = {}
@@ -173,7 +187,7 @@ class Metrics:
         user = username or "unknown"
         why = reason or "unknown"
         with self.lock:
-            # Always update last event timestamp (used in tuxedovpn_dpi_last_event_timestamp_seconds).
+            # Always update per-user last event timestamp.
             self.last_event_ts[(user, why)] = now
 
             # Coalesce overly "noisy" Suricata streams: count at most once per (user, reason)
@@ -187,22 +201,31 @@ class Metrics:
 
             k = (user, why, "detect", "match")
             self.event_total[k] = self.event_total.get(k, 0) + 1
+            self.node_event_total[("detect", "match")] = self.node_event_total.get(("detect", "match"), 0) + 1
 
     def observe_disconnect(self, username: str, reason: str, result: str):
+        now = int(time.time())
         user = username or "unknown"
         why = reason or "unknown"
         res = result or "unknown"
         with self.lock:
             k = (user, why, "disconnect", res)
             self.event_total[k] = self.event_total.get(k, 0) + 1
+            self.node_event_total[("disconnect", res)] = self.node_event_total.get(("disconnect", res), 0) + 1
 
     def observe_webhook(self, username: str, reason: str, result: str):
+        now = int(time.time())
         user = username or "unknown"
         why = reason or "unknown"
         res = result or "unknown"
         with self.lock:
             k = (user, why, "webhook", res)
             self.event_total[k] = self.event_total.get(k, 0) + 1
+            self.node_event_total[("webhook", res)] = self.node_event_total.get(("webhook", res), 0) + 1
+
+    def observe_unblock(self, username: str, ts: int | None = None):
+        with self.lock:
+            self.node_event_total[("unblock", "expired")] = self.node_event_total.get(("unblock", "expired"), 0) + 1
 
     def can_disconnect(self, username: str) -> bool:
         now = int(time.time())
@@ -233,12 +256,34 @@ class Metrics:
         lines.append("# TYPE tuxedovpn_dpi_uptime_seconds gauge")
         lines.append('tuxedovpn_dpi_uptime_seconds{nodename="' + SAFE_NODE_NAME + '"} ' + str(now - self.start_ts))
 
-        lines.append("# HELP tuxedovpn_dpi_events_total DPI pipeline events by stage/result/reason")
+        lines.append(
+            "# HELP tuxedovpn_dpi_events_total DPI pipeline events (node-level: {nodename,stage,result}; per-user: {nodename,user,reason,stage,result})"
+        )
         lines.append("# TYPE tuxedovpn_dpi_events_total counter")
         lines.append("# HELP tuxedovpn_dpi_last_event_timestamp_seconds Timestamp of the last DPI event per user and reason (seconds)")
         lines.append("# TYPE tuxedovpn_dpi_last_event_timestamp_seconds gauge")
 
         with self.lock:
+            # Anchor series keeps metric present when there are no per-user events yet.
+            lines.append(
+                'tuxedovpn_dpi_last_event_timestamp_seconds{nodename="'
+                + SAFE_NODE_NAME
+                + '",user="",reason=""} '
+                + "0"
+            )
+            for (stage, res), count in sorted(self.node_event_total.items()):
+                safe_stage = str(stage).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+                safe_res = str(res).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+                lines.append(
+                    'tuxedovpn_dpi_events_total{nodename="'
+                    + SAFE_NODE_NAME
+                    + '",stage="'
+                    + safe_stage
+                    + '",result="'
+                    + safe_res
+                    + '"} '
+                    + str(count)
+                )
             for (user, why, stage, res), count in sorted(self.event_total.items()):
                 safe_user = str(user).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
                 safe_why = str(why).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
@@ -356,9 +401,10 @@ def _extract_ip(value):
         return None
 
 
-def _resolve_username_by_vpn_ip(vpn_ip: str):
+def _resolve_username_by_vpn_ip(vpn_ip: str, *, force_refresh: bool = False):
     now = time.time()
-    if now - _occtl_cache["ts"] > 5:
+    cache_ttl = max(0, int(OCCTL_CACHE_SECONDS))
+    if force_refresh or now - _occtl_cache["ts"] > cache_ttl:
         _occtl_cache["sessions"] = _occtl_sessions()
         _occtl_cache["ts"] = now
     for session in _occtl_cache["sessions"]:
@@ -448,10 +494,15 @@ def _parse_utc_iso_to_epoch(value: str) -> int | None:
 
 
 def _cleanup_blocks(now: int):
-    for d in (_blocked_until_by_user, _blocked_until_by_vpn_ip):
-        for k, v in list(d.items()):
-            if int(v) <= now:
-                d.pop(k, None)
+    expired_users = []
+    for username, until in list(_blocked_until_by_user.items()):
+        if int(until) <= now:
+            _blocked_until_by_user.pop(username, None)
+            expired_users.append((str(username), int(until)))
+    for vpn_ip, until in list(_blocked_until_by_vpn_ip.items()):
+        if int(until) <= now:
+            _blocked_until_by_vpn_ip.pop(vpn_ip, None)
+    return expired_users
 
 
 def enforce_blocks():
@@ -459,9 +510,16 @@ def enforce_blocks():
         time.sleep(max(1, int(ENFORCE_POLL_SECONDS)))
         now = int(time.time())
         with _block_lock:
-            _cleanup_blocks(now)
+            expired_users = _cleanup_blocks(now)
             blocked_users = {u for u, until in _blocked_until_by_user.items() if int(until) > now}
             blocked_ips = {ip for ip, until in _blocked_until_by_vpn_ip.items() if int(until) > now}
+
+        for username, until in expired_users:
+            metrics.observe_unblock(username, until)
+            _log_event(
+                "unblock",
+                {"stage": "unblock", "result": "expired", "user": username, "blocked_until_epoch": until},
+            )
 
         if not blocked_users and not blocked_ips:
             continue
@@ -592,6 +650,9 @@ def _process_eve_record(record: dict):
         return
 
     username = _resolve_username_by_vpn_ip(vpn_ip) if vpn_ip else None
+    if not username and vpn_ip:
+        # Force-refresh occtl sessions on a DPI hit to reduce resolution lag.
+        username = _resolve_username_by_vpn_ip(vpn_ip, force_refresh=True)
     if username:
         _ip_user_cache[vpn_ip] = {"ts": time.time(), "user": str(username)}
     else:
@@ -698,8 +759,17 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     _log(
-        "Started. EVE_FILE=%r VPN_SUBNETS=%r MATCH_MODE=%r RULESET_PATH=%r EVE_EVENT_TYPES=%r BLOCK_SECONDS=%r"
-        % (EVE_FILE, VPN_SUBNETS_RAW, MATCH_MODE, RULESET_PATH, sorted(EVE_EVENT_TYPES), BLOCK_SECONDS)
+        "Started. EVE_FILE=%r VPN_SUBNETS=%r MATCH_MODE=%r RULESET_PATH=%r EVE_EVENT_TYPES=%r "
+        "BLOCK_SECONDS=%r OCCTL_CACHE_SECONDS=%r"
+        % (
+            EVE_FILE,
+            VPN_SUBNETS_RAW,
+            MATCH_MODE,
+            RULESET_PATH,
+            sorted(EVE_EVENT_TYPES),
+            BLOCK_SECONDS,
+            OCCTL_CACHE_SECONDS,
+        )
     )
     t = threading.Thread(target=tail_eve, daemon=True)
     t.start()

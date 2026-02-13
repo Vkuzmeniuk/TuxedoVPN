@@ -2,6 +2,25 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+{%- macro wg_ip_for(host) -%}
+  {%- set ip = (hostvars[host].mgmt_wireguard_wireguard_ip | default('') | trim) -%}
+  {%- if ip | length == 0 -%}
+    {%- set ip = (hostvars[host].mgmt_wireguard_wireguard_address | default('') | regex_replace('/.*$', '') | trim) -%}
+  {%- endif -%}
+  {%- if ip | length == 0 and (mgmt_wireguard_auto_assign_vpn_addresses | default(true) | bool) -%}
+    {%- set mgmt_addr = (mgmt_wireguard_address_mgmt | default('') | trim) -%}
+    {%- set prefix_ok = (mgmt_addr is search('/24$')) -%}
+    {%- set base = (mgmt_addr | regex_replace('/.*$', '') | regex_replace('\\.\\d+$', '.') | trim) -%}
+    {%- set base_ok = (base is search('^\\d+\\.\\d+\\.\\d+\\.$')) -%}
+    {%- set vpn_group = (mgmt_wireguard_vpn_group | default('vpn')) -%}
+    {%- set vpn_hosts = groups[vpn_group] | default([]) -%}
+    {%- if prefix_ok and base_ok and (host in vpn_hosts) -%}
+      {%- set ip = base ~ (((mgmt_wireguard_vpn_ip_start | default(2) | int) + (vpn_hosts.index(host) | int)) | string) -%}
+    {%- endif -%}
+  {%- endif -%}
+  {{ ip }}
+{%- endmacro %}
+
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
@@ -9,7 +28,7 @@ scrape_configs:
 
 {% if freeradius_prometheus_enable | default(false) | bool %}
   - job_name: 'freeradius_prometheus'
-    scrape_interval: 15s
+    scrape_interval: "{{ prometheus_freeradius_prometheus_scrape_interval | default('15s') }}"
     metrics_path: "/metrics"
     static_configs:
       - targets:
@@ -20,7 +39,7 @@ scrape_configs:
 {% set _freeradius_acct_exporter_ip = (freeradius_accounting_exporter_listen_ip | default('127.0.0.1') | trim) %}
 {% set _freeradius_acct_exporter_target = ('localhost' if _freeradius_acct_exporter_ip in ['127.0.0.1', '::1', 'localhost'] else _freeradius_acct_exporter_ip) %}
   - job_name: 'freeradius_accounting'
-    scrape_interval: 15s
+    scrape_interval: "{{ prometheus_freeradius_accounting_scrape_interval | default('30s') }}"
     metrics_path: "{{ freeradius_accounting_exporter_metrics_path | default('/metrics') }}"
     static_configs:
       - targets:
@@ -29,7 +48,7 @@ scrape_configs:
 
 {% if radius_pihole_sync_enable | default(false) | bool %}
   - job_name: 'radius_pihole_sync'
-    scrape_interval: 15s
+    scrape_interval: "{{ prometheus_radius_pihole_sync_scrape_interval | default('15s') }}"
     metrics_path: "{{ radius_pihole_sync_metrics_path | default('/metrics') }}"
     static_configs:
       - targets:
@@ -56,7 +75,7 @@ scrape_configs:
           - "localhost:{{ _node_port }}"
 {%     else %}
 {%       set _prefer_wg = (prometheus_prefer_mgmt_wireguard | default(true) | bool) %}
-{%       set _wg_ip = (hostvars[h].mgmt_wireguard_wireguard_ip | default('') | trim) %}
+{%       set _wg_ip = (wg_ip_for(h) | trim) %}
 {%       set _node_ip = (_wg_ip if _prefer_wg and (_wg_ip | length > 0) else (hostvars[h].ansible_host | default(h))) %}
           - "{{ _node_ip }}:{{ _node_port }}"
 {%     endif %}
@@ -69,12 +88,12 @@ scrape_configs:
 {% for p in _vpn_target_groups %}
 {% if p in groups %}
   - job_name: 'ocserv_exporter_{{ p }}'
-    scrape_interval: 5s
+    scrape_interval: "{{ prometheus_ocserv_exporter_scrape_interval | default('10s') }}"
     static_configs:
       - targets:
 {%   for loc_h in groups[p] %}
 {%     set _prefer_wg = (prometheus_prefer_mgmt_wireguard | default(true) | bool) %}
-{%     set _wg_ip = (hostvars[loc_h].mgmt_wireguard_wireguard_ip | default('') | trim) %}
+{%     set _wg_ip = (wg_ip_for(loc_h) | trim) %}
 {%     set _exporter_ip = (_wg_ip if _prefer_wg and (_wg_ip | length > 0) else (hostvars[loc_h].ansible_host | default(loc_h))) %}
           - "{{ _exporter_ip }}:{{ hostvars[loc_h].ocserv_exporter_port | default(9813) }}"
 {%   endfor %}
@@ -86,13 +105,13 @@ scrape_configs:
 {% for p in _vpn_target_groups %}
 {% if p in groups %}
   - job_name: 'dpi_agent_{{ p }}'
-    scrape_interval: 5s
+    scrape_interval: "{{ prometheus_dpi_agent_scrape_interval | default('10s') }}"
     metrics_path: "/metrics"
     static_configs:
       - targets:
 {%   for loc_h in groups[p] %}
 {%     set _prefer_wg = (prometheus_prefer_mgmt_wireguard | default(true) | bool) %}
-{%     set _wg_ip = (hostvars[loc_h].mgmt_wireguard_wireguard_ip | default('') | trim) %}
+{%     set _wg_ip = (wg_ip_for(loc_h) | trim) %}
 {%     set _dpi_ip = (_wg_ip if _prefer_wg and (_wg_ip | length > 0) else (hostvars[loc_h].ansible_host | default(loc_h))) %}
           - "{{ _dpi_ip }}:{{ hostvars[loc_h].dpi_agent_port | default(dpi_agent_port | default(9815)) }}"
 {%   endfor %}

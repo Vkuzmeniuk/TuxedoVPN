@@ -360,6 +360,7 @@
     mode: '0755'
   when: common_vpn_exporter_enable | bool
   notify: Restart ocserv Prometheus exporter
+  tags: ['ocserv', 'metrics', 'ocserv_exporter']
 
 - name: Install ocserv Prometheus exporter service
   ansible.builtin.template:
@@ -370,6 +371,7 @@
     mode: '0644'
   when: common_vpn_exporter_enable | bool
   notify: Restart ocserv Prometheus exporter
+  tags: ['ocserv', 'metrics', 'ocserv_exporter']
 
 - name: Ensure ocserv Prometheus exporter is running
   ansible.builtin.systemd:
@@ -378,7 +380,7 @@
     state: started
     daemon_reload: true
   when: common_vpn_exporter_enable | bool
-  tags: ['ocserv', 'metrics']
+  tags: ['ocserv', 'metrics', 'ocserv_exporter']
 
 - name: Ensure python3-pexpect is present (local auth only)
   ansible.builtin.apt:

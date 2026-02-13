@@ -15,6 +15,8 @@ scrape_configs:
       - targets: [localhost]
         labels:
           job: syslog
+          service: syslog
+          service_name: syslog
           host: "{{ inventory_hostname }}"
           __path__: /var/log/syslog
 
@@ -23,6 +25,8 @@ scrape_configs:
       - targets: [localhost]
         labels:
           job: auth
+          service: auth
+          service_name: auth
           host: "{{ inventory_hostname }}"
           __path__: /var/log/auth.log
 
@@ -31,6 +35,8 @@ scrape_configs:
       - targets: [localhost]
         labels:
           job: ocserv
+          service: ocserv
+          service_name: ocserv
           host: "{{ inventory_hostname }}"
           __path__: "{{ promtail_ocserv_log_path }}"
 
@@ -40,6 +46,8 @@ scrape_configs:
       - targets: [localhost]
         labels:
           job: fail2ban
+          service: fail2ban
+          service_name: fail2ban
           host: "{{ inventory_hostname }}"
           __path__: "{{ promtail_fail2ban_log_path }}"
 
@@ -56,6 +64,52 @@ scrape_configs:
         action: keep
       - source_labels: ['__journal__systemd_unit']
         target_label: unit
+      - source_labels: ['unit']
+        regex: '(.+)'
+        target_label: service_name
+        replacement: '$1'
+      - source_labels: ['unit']
+        regex: '^(.+)\\.service$'
+        target_label: service
+        replacement: '$1'
+      - source_labels: ['__journal__systemd_unit']
+        regex: 'tuxedovpn-dpi-agent\\.service'
+        target_label: job
+        replacement: dpi
+      - source_labels: ['__journal__systemd_unit']
+        regex: 'tuxedovpn-dpi-agent\\.service'
+        target_label: component
+        replacement: dpi-agent
+      - source_labels: ['__journal__systemd_unit']
+        regex: 'tuxedovpn-dpi-agent\\.service'
+        target_label: service
+        replacement: dpi-agent
+      - source_labels: ['__journal__systemd_unit']
+        regex: 'tuxedovpn-dpi-blocker\\.service'
+        target_label: job
+        replacement: dpi
+      - source_labels: ['__journal__systemd_unit']
+        regex: 'tuxedovpn-dpi-blocker\\.service'
+        target_label: component
+        replacement: dpi-blocker
+      - source_labels: ['__journal__systemd_unit']
+        regex: 'tuxedovpn-dpi-blocker\\.service'
+        target_label: service
+        replacement: dpi-blocker
+    pipeline_stages:
+      - match:
+          selector: '{job=~"journal|dpi"} |~ "^DPI_EVENT\\\\s+\\\\{"'
+          stages:
+            - regex:
+                expression: '^DPI_EVENT\\s+(?P<dpi_json>\\{.*\\})$'
+            - json:
+                source: dpi_json
+                expressions:
+                  ts_utc: ts_utc
+            - timestamp:
+                source: ts_utc
+                format: RFC3339Nano
+                action_on_failure: skip
 
 {% if 'vpn' in group_names %}
   - job_name: suricata_fast
@@ -63,6 +117,8 @@ scrape_configs:
       - targets: [localhost]
         labels:
           job: suricata
+          service: suricata
+          service_name: suricata
           host: "{{ inventory_hostname }}"
           stream: fast
           __path__: /var/log/suricata/fast.log
@@ -73,6 +129,8 @@ scrape_configs:
       - targets: [localhost]
         labels:
           job: suricata
+          service: suricata
+          service_name: suricata
           host: "{{ inventory_hostname }}"
           stream: eve
           __path__: /var/log/suricata/eve.json
@@ -85,6 +143,8 @@ scrape_configs:
       - targets: [localhost]
         labels:
           job: pihole
+          service: pihole
+          service_name: pihole
           host: "{{ inventory_hostname }}"
           __path__: /var/log/pihole/*.log
 
@@ -93,6 +153,8 @@ scrape_configs:
       - targets: [localhost]
         labels:
           job: freeradius
+          service: freeradius
+          service_name: freeradius
           host: "{{ inventory_hostname }}"
           __path__: /var/log/freeradius/*.log
 
@@ -101,6 +163,8 @@ scrape_configs:
       - targets: [localhost]
         labels:
           job: nginx
+          service: nginx
+          service_name: nginx
           host: "{{ inventory_hostname }}"
           __path__: /var/log/nginx/*.log
 
@@ -109,6 +173,8 @@ scrape_configs:
       - targets: [localhost]
         labels:
           job: grafana
+          service: grafana
+          service_name: grafana
           host: "{{ inventory_hostname }}"
           __path__: /var/log/grafana/grafana.log
 
@@ -117,6 +183,8 @@ scrape_configs:
       - targets: [localhost]
         labels:
           job: postgresql
+          service: postgresql
+          service_name: postgresql
           host: "{{ inventory_hostname }}"
           __path__: /var/log/postgresql/postgresql-*.log
 {% endif %}

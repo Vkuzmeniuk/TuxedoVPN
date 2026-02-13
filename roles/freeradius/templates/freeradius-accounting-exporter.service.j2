@@ -17,6 +17,7 @@ Environment=FREERADIUS_ACCT_EXPORTER_METRICS_PATH={{ freeradius_accounting_expor
 Environment=FREERADIUS_ACCT_EXPORTER_DB_NAME={{ freeradius_db_name | default('radius') }}
 Environment=FREERADIUS_ACCT_EXPORTER_TOP_N={{ freeradius_accounting_exporter_top_n | default(0) }}
 Environment=FREERADIUS_ACCT_EXPORTER_SPLIT_BY_NAS={{ (freeradius_accounting_exporter_split_by_nas | default(false) | bool) | ternary('1','0') }}
+Environment="FREERADIUS_ACCT_EXPORTER_NAS_NODENAME_MAP={{ (freeradius_accounting_exporter_nas_nodename_map | default({})) | to_json | replace('\"', '\\\"') }}"
 Environment=FREERADIUS_ACCT_EXPORTER_CONNECT_TIMEOUT={{ freeradius_accounting_exporter_connect_timeout | default(2) }}
 Environment=FREERADIUS_ACCT_EXPORTER_STATEMENT_TIMEOUT={{ freeradius_accounting_exporter_statement_timeout | default(5) }}
 

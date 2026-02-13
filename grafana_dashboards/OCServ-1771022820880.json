@@ -63,6 +63,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
+  "id": null,
   "links": [],
   "panels": [
     {
@@ -121,17 +122,17 @@
       "pluginVersion": "12.3.1",
       "targets": [
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "editorMode": "code",
           "exemplar": false,
           "expr": "sum by (nodename) (ocserv_sessions_total{job=\"$ocserv_job\",nodename=~\"$nodename\"})",
           "instant": true,
           "legendFormat": "__auto",
           "range": false,
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          }
+          "refId": "A"
         }
       ],
       "title": "Sessions by node",
@@ -325,7 +326,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "8 * rate(ocserv_sessions_bytes_sent_total{job=\"$ocserv_job\",nodename=~\"$nodename\"}[$__rate_interval])",
+          "expr": "sum by (nodename) (8 * rate(ocserv_sessions_bytes_sent{job=\"$ocserv_job\",nodename=~\"$nodename\"}[$__rate_interval])) or on(nodename) (0 * ocserv_sessions_total{job=\"$ocserv_job\",nodename=~\"$nodename\"})",
           "hide": false,
           "instant": false,
           "legendFormat": "Download {{nodename}}",
@@ -338,7 +339,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "8 * rate(ocserv_sessions_bytes_received_total{job=\"$ocserv_job\",nodename=~\"$nodename\"}[$__rate_interval])",
+          "expr": "sum by (nodename) (8 * rate(ocserv_sessions_bytes_received{job=\"$ocserv_job\",nodename=~\"$nodename\"}[$__rate_interval])) or on(nodename) (0 * ocserv_sessions_total{job=\"$ocserv_job\",nodename=~\"$nodename\"})",
           "legendFormat": "Upload {{nodename}}",
           "range": true,
           "refId": "B"
@@ -542,14 +543,13 @@
     ]
   },
   "time": {
-    "from": "now-30m",
+    "from": "now-24h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "OCServ",
   "uid": "rYdddlPWk2",
-  "version": 20,
-  "weekStart": "",
-  "id": null
+  "version": 3,
+  "weekStart": ""
 }

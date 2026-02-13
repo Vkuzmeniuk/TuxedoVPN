@@ -1,12 +1,13 @@
 {% set username = freeradius_managed_vpn_username | replace("'", "''") %}
 {% set password = freeradius_managed_vpn_password | replace("'", "''") %}
+{% set authcheck_table = freeradius_sql_authcheck_table | default('radcheck') %}
 WITH desired AS (
     SELECT '{{ username }}'::text AS username,
            '{{ password }}'::text AS password
 ),
 existing AS (
     SELECT id, value
-      FROM radcheck
+      FROM {{ authcheck_table }}
      WHERE username = (SELECT username FROM desired)
        AND attribute = 'Cleartext-Password'
        AND op = ':='
@@ -18,7 +19,7 @@ keeper AS (
      LIMIT 1
 ),
 duplicates AS (
-    DELETE FROM radcheck
+    DELETE FROM {{ authcheck_table }}
      WHERE username = (SELECT username FROM desired)
        AND attribute = 'Cleartext-Password'
        AND op = ':='
@@ -26,14 +27,14 @@ duplicates AS (
     RETURNING 1
 ),
 updated AS (
-    UPDATE radcheck
+    UPDATE {{ authcheck_table }}
        SET value = (SELECT password FROM desired)
      WHERE id = (SELECT id FROM keeper)
        AND value <> (SELECT password FROM desired)
     RETURNING 1
 ),
 inserted AS (
-    INSERT INTO radcheck (username, attribute, op, value)
+    INSERT INTO {{ authcheck_table }} (username, attribute, op, value)
     SELECT d.username, 'Cleartext-Password', ':=', d.password
       FROM desired d
      WHERE NOT EXISTS (SELECT 1 FROM keeper)
